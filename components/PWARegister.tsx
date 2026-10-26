@@ -10,6 +10,17 @@ declare global {
 
 export function PWARegister() {
   useEffect(() => {
+    // Purge outdated service worker caches from browser storage
+    if (typeof window !== 'undefined' && 'caches' in window) {
+      caches.keys().then((keys) => {
+        keys.forEach((key) => {
+          if (key.includes('spotify') && !key.includes('v6-client-audio-instant')) {
+            caches.delete(key).catch(() => {});
+          }
+        });
+      });
+    }
+
     if ('serviceWorker' in navigator) {
       navigator.serviceWorker
         .register('/sw.js')

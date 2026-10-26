@@ -116,7 +116,7 @@ export function Player() {
     : currentTrack?.artist?.name || '';
   const currentTrackDuration = currentTrack?.duration;
 
-  // 2. Fetch Synchronized Lyrics
+  // 2. Fetch Synchronized Lyrics (non-blocking, timeout-protected)
   useEffect(() => {
     if (!currentVideoId) {
       setLyrics([]);
@@ -125,6 +125,13 @@ export function Player() {
     }
 
     let isCancelled = false;
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => {
+      try {
+        controller.abort();
+      } catch {}
+    }, 3500);
+
     setIsLyricsLoading(true);
 
     const dur = Math.round(duration || currentTrackDuration || 200);
@@ -132,11 +139,11 @@ export function Player() {
       currentTrackName || ''
     )}&artist=${encodeURIComponent(currentArtistName)}&duration=${dur}`;
 
-    fetch(url)
+    fetch(url, { signal: controller.signal })
       .then((res) => (res.ok ? res.json() : { synced: false, lyrics: [] }))
       .then((data) => {
         if (!isCancelled) {
-          if (Array.isArray(data.lyrics) && data.lyrics.length > 0) {
+          if (Array.isArray(data?.lyrics) && data.lyrics.length > 0) {
             setLyrics(data.lyrics);
             setIsSyncedLyrics(Boolean(data.synced));
           } else {
@@ -152,11 +159,16 @@ export function Player() {
         }
       })
       .finally(() => {
+        clearTimeout(timeoutId);
         if (!isCancelled) setIsLyricsLoading(false);
       });
 
     return () => {
       isCancelled = true;
+      clearTimeout(timeoutId);
+      try {
+        controller.abort();
+      } catch {}
     };
   }, [currentVideoId, currentTrackName, currentArtistName, currentTrackDuration, duration]);
 

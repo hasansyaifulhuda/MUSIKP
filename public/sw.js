@@ -1,4 +1,4 @@
-const CACHE_NAME = 'spotify-clone-v5-client-playback';
+const CACHE_NAME = 'spotify-clone-v6-client-audio-instant';
 const STATIC_ASSETS = [
   '/',
   '/search',
@@ -41,9 +41,19 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
   const url = new URL(event.request.url);
 
-  // 1. Instantly short-circuit legacy /api/audio requests so they never hit network or throw format errors
+  // 1. Instantly short-circuit legacy /api/audio requests so they never hit network or throw format/timeout errors
   if (url.pathname.startsWith('/api/audio')) {
-    event.respondWith(new Response(null, { status: 204 }));
+    event.respondWith(
+      new Response(
+        JSON.stringify({
+          error: 'Audio endpoint removed: player uses client-side YouTube IFrame playback',
+        }),
+        {
+          status: 410,
+          headers: { 'Content-Type': 'application/json' },
+        }
+      )
+    );
     return;
   }
 

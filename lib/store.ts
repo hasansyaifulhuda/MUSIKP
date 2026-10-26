@@ -4,6 +4,7 @@ import { toast } from '@/lib/toast';
 
 export interface Track {
   videoId: string;
+  youtubeId?: string;
   name: string;
   artist: { name: string; artistId?: string } | { name: string; artistId?: string }[];
   thumbnails: { url: string; width: number; height: number }[];
@@ -23,31 +24,59 @@ export function extractVideoId(raw: any): string {
     id = raw.trim();
   } else {
     id =
+      raw.youtubeId ||
+      raw.youtube_id ||
       raw.videoId ||
-      raw.id ||
       raw.video_id ||
       raw.songId ||
-      (raw.track && (raw.track.videoId || raw.track.id || raw.track.video_id)) ||
+      raw.song_id ||
+      raw.id ||
+      raw.youtubeVideoId ||
+      raw.ytId ||
+      raw.yt_id ||
+      (raw.track && (
+        raw.track.youtubeId ||
+        raw.track.youtube_id ||
+        raw.track.videoId ||
+        raw.track.video_id ||
+        raw.track.songId ||
+        raw.track.song_id ||
+        raw.track.id
+      )) ||
+      raw.url ||
+      raw.link ||
+      raw.uri ||
+      (raw.track && (raw.track.url || raw.track.link || raw.track.uri)) ||
       '';
   }
 
   if (typeof id === 'string') {
+    id = id.trim();
     if (id.includes('v=')) {
       const match = id.match(/v=([a-zA-Z0-9_-]{11})/);
       if (match) return match[1];
     } else if (id.includes('youtu.be/')) {
       const match = id.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
       if (match) return match[1];
+    } else if (id.includes('/embed/')) {
+      const match = id.match(/\/embed\/([a-zA-Z0-9_-]{11})/);
+      if (match) return match[1];
+    } else if (id.includes('/shorts/')) {
+      const match = id.match(/\/shorts\/([a-zA-Z0-9_-]{11})/);
+      if (match) return match[1];
+    } else if (/^[a-zA-Z0-9_-]{11}$/.test(id)) {
+      return id;
     }
   }
 
-  return id;
+  return typeof id === 'string' ? id : '';
 }
 
 export function normalizeTrack(raw: any): Track {
   if (!raw) {
     return {
       videoId: '',
+      youtubeId: '',
       name: 'Unknown Track',
       artist: { name: 'Unknown Artist' },
       thumbnails: [{ url: 'https://picsum.photos/300/300', width: 300, height: 300 }],
@@ -95,6 +124,7 @@ export function normalizeTrack(raw: any): Track {
 
   return {
     videoId,
+    youtubeId: videoId,
     name,
     artist,
     thumbnails,
@@ -273,57 +303,73 @@ export const usePlayerStore = create<PlayerState>()(
         } else {
           if (playContext === 'similar' && currentTrack && currentTrack.videoId) {
             try {
-              const res = await fetch(`/api/upnext?id=${currentTrack.videoId}`);
-              if (!res.ok) {
-                set({ isPlaying: false, progress: 0 });
-                return;
-              }
-              const data = await res.json();
-              if (Array.isArray(data) && data.length > 0) {
-                const nextTracks = data
-                  .filter((t: any) => {
-                    const id = extractVideoId(t);
-                    return id && id !== currentTrack.videoId;
-                  })
-                  .map(normalizeTrack);
+              const controller = new AbortController();
+              const timeoutId = setTimeout(() => controller.abort(), 4000);
+              const res = await fetch(`/api/upnext?id=${encodeURIComponent(currentTrack.videoId)}`, {
+                signal: controller.signal,
+              }).catch(() => null);
+              clearTimeout(timeoutId);
 
-                if (nextTracks.length > 0) {
-                  const nextTrack = nextTracks[0];
+              if (res && res.ok) {
+                const data = await res.json().catch(() => []);
+                if (Array.isArray(data) && data.length > 0) {
+                  const nextTracks = data
+                    .filter((t: any) => {
+                      const id = extractVideoId(t);
+                      return id && id !== currentTrack.videoId;
+                    })
+                    .map(normalizeTrack);
 
-                  const state = get();
-                  const newHistoryItem = { track: nextTrack, playedAt: Date.now() };
-                  const filteredHistory = state.history.filter((h) => h.track.videoId !== nextTrack.videoId);
-                  const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+                  if (nextTracks.length > 0) {
+                    const nextTrack = nextTracks[0];
 
-                  const newPlayCounts = { ...state.playCounts };
-                  newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
+                    const state = get();
+                    const newHistoryItem = { track: nextTrack, playedAt: Date.now() };
+                    const filteredHistory = state.history.filter((h) => h.track.videoId !== nextTrack.videoId);
+                    const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
 
-                  let finalNextTracks = nextTracks;
-                  if (state.isShuffle) {
-                    const others = nextTracks.slice(1);
-                    for (let i = others.length - 1; i > 0; i--) {
-                      const j = Math.floor(Math.random() * (i + 1));
-                      [others[i], others[j]] = [others[j], others[i]];
+                    const newPlayCounts = { ...state.playCounts };
+                    newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
+
+                    let finalNextTracks = nextTracks;
+                    if (state.isShuffle) {
+                      const others = nextTracks.slice(1);
+                      for (let i = others.length - 1; i > 0; i--) {
+                        const j = Math.floor(Math.random() * (i + 1));
+                        [others[i], others[j]] = [others[j], others[i]];
+                      }
+                      finalNextTracks = [nextTrack, ...others];
                     }
-                    finalNextTracks = [nextTrack, ...others];
-                  }
 
-                  set({
-                    queue: [...queue, ...finalNextTracks],
-                    originalQueue: state.originalQueue.length > 0 ? [...state.originalQueue, ...nextTracks] : [],
-                    currentTrack: nextTrack,
-                    queueIndex: queueIndex + 1,
-                    isPlaying: true,
-                    progress: 0,
-                    history: newHistory,
-                    playCounts: newPlayCounts,
-                  });
-                  return;
+                    set({
+                      queue: [...queue, ...finalNextTracks],
+                      originalQueue: state.originalQueue.length > 0 ? [...state.originalQueue, ...nextTracks] : [],
+                      currentTrack: nextTrack,
+                      queueIndex: queueIndex + 1,
+                      isPlaying: true,
+                      progress: 0,
+                      history: newHistory,
+                      playCounts: newPlayCounts,
+                    });
+                    return;
+                  }
                 }
               }
             } catch (e) {
-              console.error('Error fetching up next tracks:', e);
+              console.warn('Safe upnext fetch fallback:', e);
             }
+          }
+          // Safe fallback when queue ends: loop if repeatMode === 'all', otherwise halt safely
+          const { repeatMode } = get();
+          if (repeatMode === 'all' && queue.length > 0) {
+            const nextTrack = queue[0];
+            set({
+              currentTrack: nextTrack,
+              queueIndex: 0,
+              isPlaying: true,
+              progress: 0,
+            });
+            return;
           }
           set({ isPlaying: false, progress: 0 });
         }

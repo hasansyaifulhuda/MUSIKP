@@ -9,11 +9,17 @@ import React, {
   useEffect,
   useRef,
 } from 'react';
+import dynamic from 'next/dynamic';
 import { usePlayerStore, Track, extractVideoId } from '@/lib/store';
 import { useHotkeys } from '@/hooks/useHotkeys';
 import { db } from '@/lib/db';
 import { toast } from '@/lib/toast';
 import { getHighResImage } from '@/lib/utils';
+
+// Client-only dynamic import of react-youtube to ensure 100% SSR safety
+const YouTube = dynamic(() => import('react-youtube'), {
+  ssr: false,
+});
 
 export interface MusicContextType {
   currentTrack: Track | null;
@@ -53,63 +59,6 @@ const MusicContext = createContext<MusicContextType | null>(null);
 
 const LIKED_STORAGE_KEY = 'spotify_liked_tracks';
 
-declare global {
-  interface Window {
-    YT: any;
-    onYouTubeIframeAPIReady: () => void;
-  }
-}
-
-/**
- * Loads the official YouTube IFrame Player API script in the browser.
- * Guarantees singleton script injection and promise-based readiness with polling fallback.
- */
-function loadYouTubeIframeApi(): Promise<void> {
-  return new Promise((resolve) => {
-    if (typeof window === 'undefined') return;
-
-    if (window.YT && window.YT.Player) {
-      resolve();
-      return;
-    }
-
-    const pollInterval = setInterval(() => {
-      if (window.YT && window.YT.Player) {
-        clearInterval(pollInterval);
-        resolve();
-      }
-    }, 50);
-
-    setTimeout(() => {
-      clearInterval(pollInterval);
-    }, 10000);
-
-    const prevCallback = window.onYouTubeIframeAPIReady;
-    window.onYouTubeIframeAPIReady = () => {
-      if (typeof prevCallback === 'function') {
-        try {
-          prevCallback();
-        } catch {}
-      }
-      clearInterval(pollInterval);
-      resolve();
-    };
-
-    if (!document.getElementById('youtube-iframe-api-script')) {
-      const tag = document.createElement('script');
-      tag.id = 'youtube-iframe-api-script';
-      tag.src = 'https://www.youtube.com/iframe_api';
-      tag.async = true;
-      const firstScriptTag = document.getElementsByTagName('script')[0];
-      if (firstScriptTag && firstScriptTag.parentNode) {
-        firstScriptTag.parentNode.insertBefore(tag, firstScriptTag);
-      } else {
-        document.head.appendChild(tag);
-      }
-    }
-  });
-}
-
 export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Store subscriptions
   const currentTrack = usePlayerStore((state) => state.currentTrack);
@@ -138,14 +87,11 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const clearQueue = usePlayerStore((state) => state.clearQueue);
 
   // =========================================================================
-  // 1. YouTube IFrame Player References & State Machine
+  // 1. YouTube Player References & State Machine via react-youtube
   // =========================================================================
   const playerRef = useRef<any>(null);
-  const portalContainerRef = useRef<HTMLDivElement>(null);
   const isPlayerReadyRef = useRef<boolean>(false);
   const loadedTrackIdRef = useRef<string | null>(null);
-  const pendingVideoIdRef = useRef<string | null>(null);
-  const pendingAutoPlayRef = useRef<boolean>(true);
   const isSeekingLockRef = useRef<boolean>(false);
   const seekCooldownTimeoutRef = useRef<NodeJS.Timeout | null>(null);
   const consecutiveFailuresRef = useRef<number>(0);
@@ -153,10 +99,15 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const bufferingWatchdogRef = useRef<NodeJS.Timeout | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
 
-  const [isMuted, setIsMuted] = useState(false);
-  const [prevVolume, setPrevVolume] = useState(100);
+  const [isMounted, setIsMounted] = useState<boolean>(false);
+  const [isMuted, setIsMuted] = useState<boolean>(false);
+  const [prevVolume, setPrevVolume] = useState<number>(100);
 
-  // 1A. Hardware Audio Focus Keep-Alive (protects against iOS/Android background audio ducking)
+  useEffect(() => {
+    setIsMounted(true);
+  }, []);
+
+  // 1A. Hardware Audio Focus Keep-Alive (prevents mobile background audio ducking)
   const initAudioContextKeepAlive = useCallback(() => {
     if (typeof window === 'undefined') return;
     try {
@@ -192,155 +143,6 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const handlePlayerErrorRef = useRef<(code: number) => void>(() => {});
   const handleStreamStalledRef = useRef<() => void>(() => {});
 
-  // 1C. Initialize YouTube IFrame Player Instance (singleton on mount)
-  useEffect(() => {
-    let isCancelled = false;
-
-    loadYouTubeIframeApi().then(() => {
-      if (isCancelled) return;
-
-      const container = portalContainerRef.current;
-      if (!container || !window.YT || !window.YT.Player) return;
-
-      // Check if existing player iframe is still connected to the DOM
-      if (playerRef.current) {
-        try {
-          const iframe = typeof playerRef.current.getIframe === 'function' ? playerRef.current.getIframe() : null;
-          if (iframe && document.body.contains(iframe)) {
-            return;
-          }
-        } catch {}
-        try {
-          playerRef.current.destroy();
-        } catch {}
-        playerRef.current = null;
-        isPlayerReadyRef.current = false;
-      }
-
-      try {
-        container.innerHTML = '<div id="youtube-hidden-player-mount"></div>';
-        const targetVideoId = pendingVideoIdRef.current || extractVideoId(usePlayerStore.getState().currentTrack);
-
-        const playerConfig: any = {
-          height: '200',
-          width: '200',
-          playerVars: {
-            autoplay: 1,
-            controls: 0,
-            disablekb: 1,
-            fs: 0,
-            rel: 0,
-            modestbranding: 1,
-            playsinline: 1, // Crucial for iOS / Android mobile browsers
-            enablejsapi: 1,
-            iv_load_policy: 3,
-            origin: typeof window !== 'undefined' && window.location.origin ? window.location.origin : undefined,
-          },
-          events: {
-            onReady: (event: any) => {
-              isPlayerReadyRef.current = true;
-              const storeState = usePlayerStore.getState();
-
-              // Sync initial volume
-              try {
-                event.target.setVolume(storeState.volume);
-                if (isMuted) {
-                  event.target.mute();
-                } else {
-                  event.target.unMute();
-                }
-              } catch {}
-
-              // If a track was queued before onReady
-              const vidToLoad = pendingVideoIdRef.current || extractVideoId(storeState.currentTrack);
-              if (vidToLoad) {
-                loadedTrackIdRef.current = vidToLoad;
-                pendingVideoIdRef.current = null;
-                try {
-                  event.target.loadVideoById({ videoId: vidToLoad, startSeconds: 0 });
-                  if (storeState.isPlaying || pendingAutoPlayRef.current) {
-                    event.target.playVideo();
-                  } else {
-                    event.target.pauseVideo();
-                  }
-                } catch (e) {
-                  console.warn('Error loading video on player ready:', e);
-                }
-              }
-            },
-            onStateChange: (event: any) => {
-              const state = event.data;
-              const YTState = window.YT.PlayerState;
-
-              // Clear watchdog timer whenever state updates
-              if (bufferingWatchdogRef.current) {
-                clearTimeout(bufferingWatchdogRef.current);
-                bufferingWatchdogRef.current = null;
-              }
-
-              if (state === YTState.PLAYING) {
-                setIsBuffering(false);
-                consecutiveFailuresRef.current = 0;
-                stallRecoveryCountRef.current = 0;
-                if (!usePlayerStore.getState().isPlaying) {
-                  setPlayingStore(true);
-                }
-                if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-                  navigator.mediaSession.playbackState = 'playing';
-                }
-                try {
-                  const dur = event.target.getDuration();
-                  if (typeof dur === 'number' && dur > 0) {
-                    setDuration(dur);
-                  }
-                } catch {}
-              } else if (state === YTState.PAUSED) {
-                setIsBuffering(false);
-                if (!isSeekingLockRef.current) {
-                  if (usePlayerStore.getState().isPlaying) {
-                    setPlayingStore(false);
-                  }
-                  if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-                    navigator.mediaSession.playbackState = 'paused';
-                  }
-                }
-              } else if (state === YTState.BUFFERING) {
-                setIsBuffering(true);
-                // Watchdog: If buffering exceeds 10s, trigger stream stall recovery
-                bufferingWatchdogRef.current = setTimeout(() => {
-                  handleStreamStalledRef.current();
-                }, 10000);
-              } else if (state === YTState.ENDED) {
-                setIsBuffering(false);
-                handlePlayerEndedRef.current();
-              }
-            },
-            onError: (event: any) => {
-              setIsBuffering(false);
-              if (bufferingWatchdogRef.current) {
-                clearTimeout(bufferingWatchdogRef.current);
-                bufferingWatchdogRef.current = null;
-              }
-              handlePlayerErrorRef.current(event.data);
-            },
-          },
-        };
-
-        if (targetVideoId) {
-          playerConfig.videoId = targetVideoId;
-        }
-
-        playerRef.current = new window.YT.Player('youtube-hidden-player-mount', playerConfig);
-      } catch (err) {
-        console.error('Failed to initialize YouTube IFrame Player:', err);
-      }
-    });
-
-    return () => {
-      isCancelled = true;
-    };
-  }, [setPlayingStore, setIsBuffering, setDuration, isMuted]);
-
   // =========================================================================
   // 2. Playback Control Wrappers & Event Handlers
   // =========================================================================
@@ -367,11 +169,33 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const playTrack = useCallback(
     (track: any, queue?: any[], context?: 'playlist' | 'similar', forceIndex?: number) => {
       initAudioContextKeepAlive();
+
+      const targetVideoId = extractVideoId(track);
+      if (!targetVideoId) {
+        toast.info('ID lagu tidak ditemukan.');
+        return;
+      }
+
       setPlayingStore(true);
       setIsBuffering(true);
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
       }
+
+      // Direct Client-Side YouTube Control: Load ID directly into react-youtube instance
+      const player = playerRef.current;
+      if (player && isPlayerReadyRef.current) {
+        try {
+          loadedTrackIdRef.current = targetVideoId;
+          isSeekingLockRef.current = false;
+          stallRecoveryCountRef.current = 0;
+          player.loadVideoById(targetVideoId);
+          player.playVideo();
+        } catch (e) {
+          console.warn('Direct react-youtube play error:', e);
+        }
+      }
+
       playTrackStore(track, queue, context, forceIndex);
     },
     [playTrackStore, setPlayingStore, setIsBuffering, initAudioContextKeepAlive]
@@ -382,6 +206,21 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       initAudioContextKeepAlive();
       setPlayingStore(true);
       setIsBuffering(true);
+
+      const targetTrack = usePlayerStore.getState().queue[index];
+      if (targetTrack) {
+        const targetVid = extractVideoId(targetTrack);
+        if (targetVid && playerRef.current && isPlayerReadyRef.current) {
+          try {
+            loadedTrackIdRef.current = targetVid;
+            isSeekingLockRef.current = false;
+            stallRecoveryCountRef.current = 0;
+            playerRef.current.loadVideoById(targetVid);
+            playerRef.current.playVideo();
+          } catch {}
+        }
+      }
+
       playQueueIndexStore(index);
     },
     [playQueueIndexStore, setPlayingStore, setIsBuffering, initAudioContextKeepAlive]
@@ -389,7 +228,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   const togglePlay = useCallback(() => {
     initAudioContextKeepAlive();
-    const nextPlaying = !usePlayerStore.getState().isPlaying;
+    const currentStore = usePlayerStore.getState();
+    const nextPlaying = !currentStore.isPlaying;
     setPlayingStore(nextPlaying);
 
     const player = playerRef.current;
@@ -401,7 +241,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           player.pauseVideo();
         }
       } catch (err) {
-        console.warn('Error toggling play/pause on YouTube player:', err);
+        console.warn('Error toggling play/pause on react-youtube player:', err);
       }
     }
 
@@ -424,7 +264,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             player.pauseVideo();
           }
         } catch (err) {
-          console.warn('Error setting playing state on YouTube player:', err);
+          console.warn('Error setting playing state on react-youtube player:', err);
         }
       }
 
@@ -435,7 +275,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     [setPlayingStore, initAudioContextKeepAlive]
   );
 
-  // Flawless Seek Operation directly manipulating YouTube IFrame API
+  // Flawless Seek Operation directly manipulating react-youtube player instance
   const seekTo = useCallback(
     (time: number) => {
       const player = playerRef.current;
@@ -452,7 +292,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             player.playVideo();
           }
         } catch (err) {
-          console.warn('YouTube seek error:', err);
+          console.warn('react-youtube seek error:', err);
         }
       }
 
@@ -525,29 +365,37 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       if (!player || !isPlayerReadyRef.current) return;
 
       try {
-        const state = player.getPlayerState?.();
-        // 3 = BUFFERING, -1 = UNSTARTED
-        if (state === 3 || state === -1) {
-          if (stallRecoveryCountRef.current < 1) {
-            stallRecoveryCountRef.current++;
-            toast.info('Menyambungkan ulang audio stream...');
-            player.seekTo(0, true);
-            player.playVideo();
-            return;
-          }
+        const stateRes = player.getPlayerState?.();
+        const checkState = (state: number) => {
+          // 3 = BUFFERING, -1 = UNSTARTED
+          if (state === 3 || state === -1) {
+            if (stallRecoveryCountRef.current < 1) {
+              stallRecoveryCountRef.current++;
+              toast.info('Menyambungkan ulang audio stream...');
+              player.seekTo(0, true);
+              player.playVideo();
+              return;
+            }
 
-          stallRecoveryCountRef.current = 0;
-          toast.info('Koneksi audio YouTube macet, memutar lagu berikutnya...');
-          playNext();
+            stallRecoveryCountRef.current = 0;
+            toast.info('Koneksi audio YouTube macet, memutar lagu berikutnya...');
+            playNext();
+          }
+        };
+
+        if (stateRes && typeof stateRes.then === 'function') {
+          stateRes.then(checkState).catch(() => {});
+        } else if (typeof stateRes === 'number') {
+          checkState(stateRes);
         }
       } catch {}
     };
 
     handlePlayerErrorRef.current = (code: number) => {
-      console.warn('YouTube player error code received:', code);
+      console.warn('react-youtube player error code received:', code);
 
-      if (consecutiveFailuresRef.current >= 4) {
-        toast.error('Gagal memutar beberapa lagu. Pemutaran dihentikan.');
+      if (consecutiveFailuresRef.current >= 3) {
+        toast.error('Gagal memutar beberapa lagu. Pemutaran dihentikan agar tidak terjadi perulangan.');
         setPlayingStore(false);
         setIsBuffering(false);
         consecutiveFailuresRef.current = 0;
@@ -571,7 +419,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   }, [playNext, setPlayingStore, setIsBuffering]);
 
   // =========================================================================
-  // 3. Track Synchronization (Load new track in YouTube player)
+  // 3. Track Synchronization (Load new track into react-youtube player)
   // =========================================================================
   const currentVideoId = extractVideoId(currentTrack);
 
@@ -599,22 +447,13 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (player && isPlayerReadyRef.current) {
       try {
         if (usePlayerStore.getState().isPlaying) {
-          player.loadVideoById({
-            videoId: currentVideoId,
-            startSeconds: 0,
-          });
+          player.loadVideoById(currentVideoId);
         } else {
-          player.cueVideoById({
-            videoId: currentVideoId,
-            startSeconds: 0,
-          });
+          player.cueVideoById(currentVideoId);
         }
       } catch (err) {
-        console.warn('Error loading track into YouTube player:', err);
+        console.warn('Error synchronizing track to react-youtube player:', err);
       }
-    } else {
-      pendingVideoIdRef.current = currentVideoId;
-      pendingAutoPlayRef.current = usePlayerStore.getState().isPlaying;
     }
   }, [currentVideoId, setIsBuffering]);
 
@@ -626,15 +465,10 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (!player || !isPlayerReadyRef.current) return;
 
     try {
-      const state = player.getPlayerState?.();
       if (isPlaying) {
-        if (state !== 1 && state !== 3) {
-          player.playVideo();
-        }
+        player.playVideo();
       } else {
-        if (state === 1 || state === 3) {
-          player.pauseVideo();
-        }
+        player.pauseVideo();
       }
     } catch {}
   }, [isPlaying]);
@@ -667,36 +501,50 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       if (!player || !isPlayerReadyRef.current) return;
 
       try {
-        if (typeof player.getPlayerState === 'function') {
-          const state = player.getPlayerState();
-          if (state === 1) {
-            const dur = player.getDuration?.();
-            if (typeof dur === 'number' && dur > 0 && dur !== usePlayerStore.getState().duration) {
-              setDuration(dur);
-            }
+        if (typeof player.getCurrentTime === 'function') {
+          const curRes = player.getCurrentTime();
+          if (curRes && typeof curRes.then === 'function') {
+            curRes
+              .then((cur: number) => {
+                if (typeof cur === 'number' && !isNaN(cur) && !isSeekingLockRef.current) {
+                  setProgress(cur);
 
-            if (!isSeekingLockRef.current) {
-              const cur = player.getCurrentTime?.();
-              if (typeof cur === 'number' && !isNaN(cur)) {
-                setProgress(cur);
-
-                if (
-                  typeof navigator !== 'undefined' &&
-                  'mediaSession' in navigator &&
-                  'setPositionState' in navigator.mediaSession &&
-                  dur &&
-                  dur > 0
-                ) {
-                  try {
-                    navigator.mediaSession.setPositionState({
-                      duration: dur,
-                      playbackRate: 1,
-                      position: Math.min(dur, cur),
-                    });
-                  } catch {}
+                  const dur = usePlayerStore.getState().duration;
+                  if (
+                    typeof navigator !== 'undefined' &&
+                    'mediaSession' in navigator &&
+                    'setPositionState' in navigator.mediaSession &&
+                    dur &&
+                    dur > 0
+                  ) {
+                    try {
+                      navigator.mediaSession.setPositionState({
+                        duration: dur,
+                        playbackRate: 1,
+                        position: Math.min(dur, cur),
+                      });
+                    } catch {}
+                  }
                 }
-              }
-            }
+              })
+              .catch(() => {});
+          } else if (typeof curRes === 'number' && !isNaN(curRes) && !isSeekingLockRef.current) {
+            setProgress(curRes);
+          }
+        }
+
+        if (typeof player.getDuration === 'function') {
+          const durRes = player.getDuration();
+          if (durRes && typeof durRes.then === 'function') {
+            durRes
+              .then((dur: number) => {
+                if (typeof dur === 'number' && dur > 0 && dur !== usePlayerStore.getState().duration) {
+                  setDuration(dur);
+                }
+              })
+              .catch(() => {});
+          } else if (typeof durRes === 'number' && durRes > 0 && durRes !== usePlayerStore.getState().duration) {
+            setDuration(durRes);
           }
         }
       } catch {}
@@ -892,7 +740,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   );
 
   // =========================================================================
-  // 9. Pintasan Keyboard Global
+  // 9. Global Keyboard Shortcuts
   // =========================================================================
   useHotkeys({
     onTogglePlay: togglePlay,
@@ -907,6 +755,29 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     },
     onToggleMute: toggleMute,
   });
+
+  // =========================================================================
+  // 10. react-youtube Player Configuration (Hidden height: '0', width: '0')
+  // =========================================================================
+  const youtubeOpts = useMemo(
+    () => ({
+      height: '0',
+      width: '0',
+      playerVars: {
+        autoplay: 1,
+        controls: 0,
+        disablekb: 1,
+        fs: 0,
+        rel: 0,
+        modestbranding: 1,
+        playsinline: 1,
+        enablejsapi: 1,
+        iv_load_policy: 3,
+        origin: typeof window !== 'undefined' && window.location.origin ? window.location.origin : undefined,
+      },
+    }),
+    []
+  );
 
   const value = useMemo<MusicContextType>(
     () => ({
@@ -973,27 +844,119 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   return (
     <MusicContext.Provider value={value}>
       {/* 
-        Ref-isolated portal container for YouTube IFrame Player.
-        React will never attempt to reconcile or overwrite the inner iframe created by the YouTube API.
-        Positioned at bottom: 0, right: 0 with 200x200 and opacity: 0.005, it remains active in the viewport
-        without browser background audio throttling and 100% invisible behind the application UI.
+        Hidden YouTube Player powered by react-youtube:
+        Rendered with height: '0', width: '0' in an off-screen container.
+        Plays music continuously in the background across all page navigations.
       */}
       <div
-        ref={portalContainerRef}
-        id="youtube-player-portal"
+        id="react-youtube-hidden-container"
         aria-hidden="true"
         style={{
           position: 'fixed',
           bottom: 0,
           right: 0,
-          width: 200,
-          height: 200,
-          opacity: 0.005,
+          width: 0,
+          height: 0,
+          opacity: 0,
           pointerEvents: 'none',
           zIndex: -9999,
           overflow: 'hidden',
         }}
-      />
+      >
+        {isMounted && currentVideoId && (
+          <YouTube
+            videoId={currentVideoId}
+            id="react-youtube-player-iframe"
+            opts={youtubeOpts}
+            onReady={(event: any) => {
+              playerRef.current = event.target;
+              isPlayerReadyRef.current = true;
+              loadedTrackIdRef.current = currentVideoId;
+              const storeState = usePlayerStore.getState();
+
+              try {
+                event.target.setVolume(storeState.volume);
+                if (isMuted) {
+                  event.target.mute();
+                } else {
+                  event.target.unMute();
+                }
+                if (storeState.isPlaying) {
+                  event.target.playVideo();
+                } else {
+                  event.target.pauseVideo();
+                }
+              } catch (e) {
+                console.warn('react-youtube onReady error:', e);
+              }
+            }}
+            onStateChange={(event: any) => {
+              const state = event.data;
+              if (bufferingWatchdogRef.current) {
+                clearTimeout(bufferingWatchdogRef.current);
+                bufferingWatchdogRef.current = null;
+              }
+
+              // 1: PLAYING
+              if (state === 1) {
+                setIsBuffering(false);
+                consecutiveFailuresRef.current = 0;
+                stallRecoveryCountRef.current = 0;
+                if (!usePlayerStore.getState().isPlaying) {
+                  setPlayingStore(true);
+                }
+                if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+                  navigator.mediaSession.playbackState = 'playing';
+                }
+                try {
+                  const durRes = event.target.getDuration();
+                  if (durRes && typeof durRes.then === 'function') {
+                    durRes
+                      .then((dur: number) => {
+                        if (typeof dur === 'number' && dur > 0) setDuration(dur);
+                      })
+                      .catch(() => {});
+                  } else if (typeof durRes === 'number' && durRes > 0) {
+                    setDuration(durRes);
+                  }
+                } catch {}
+              }
+              // 2: PAUSED
+              else if (state === 2) {
+                setIsBuffering(false);
+                if (!isSeekingLockRef.current) {
+                  if (usePlayerStore.getState().isPlaying) {
+                    setPlayingStore(false);
+                  }
+                  if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+                    navigator.mediaSession.playbackState = 'paused';
+                  }
+                }
+              }
+              // 3: BUFFERING
+              else if (state === 3) {
+                setIsBuffering(true);
+                bufferingWatchdogRef.current = setTimeout(() => {
+                  handleStreamStalledRef.current();
+                }, 10000);
+              }
+              // 0: ENDED
+              else if (state === 0) {
+                setIsBuffering(false);
+                handlePlayerEndedRef.current();
+              }
+            }}
+            onError={(event: any) => {
+              setIsBuffering(false);
+              if (bufferingWatchdogRef.current) {
+                clearTimeout(bufferingWatchdogRef.current);
+                bufferingWatchdogRef.current = null;
+              }
+              handlePlayerErrorRef.current(event.data);
+            }}
+          />
+        )}
+      </div>
       {children}
     </MusicContext.Provider>
   );
