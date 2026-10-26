@@ -1,0 +1,534 @@
+import { create } from 'zustand';
+import { persist } from 'zustand/middleware';
+import { toast } from '@/lib/toast';
+
+export interface Track {
+  videoId: string;
+  name: string;
+  artist: { name: string; artistId?: string } | { name: string; artistId?: string }[];
+  thumbnails: { url: string; width: number; height: number }[];
+  duration?: number;
+  isExplicit?: boolean;
+}
+
+export interface HistoryItem {
+  track: Track;
+  playedAt: number;
+}
+
+export function extractVideoId(raw: any): string {
+  if (!raw) return '';
+  let id = '';
+  if (typeof raw === 'string') {
+    id = raw.trim();
+  } else {
+    id =
+      raw.videoId ||
+      raw.id ||
+      raw.video_id ||
+      raw.songId ||
+      (raw.track && (raw.track.videoId || raw.track.id || raw.track.video_id)) ||
+      '';
+  }
+
+  if (typeof id === 'string') {
+    if (id.includes('v=')) {
+      const match = id.match(/v=([a-zA-Z0-9_-]{11})/);
+      if (match) return match[1];
+    } else if (id.includes('youtu.be/')) {
+      const match = id.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/);
+      if (match) return match[1];
+    }
+  }
+
+  return id;
+}
+
+export function normalizeTrack(raw: any): Track {
+  if (!raw) {
+    return {
+      videoId: '',
+      name: 'Unknown Track',
+      artist: { name: 'Unknown Artist' },
+      thumbnails: [{ url: 'https://picsum.photos/300/300', width: 300, height: 300 }],
+    };
+  }
+
+  const videoId = extractVideoId(raw);
+  const name = raw.name || raw.title || (raw.track && (raw.track.name || raw.track.title)) || 'Unknown Track';
+
+  let artist: { name: string; artistId?: string } | { name: string; artistId?: string }[] = { name: 'Unknown Artist' };
+  const rawArtist = raw.artist || raw.artists || (raw.track && (raw.track.artist || raw.track.artists));
+
+  if (Array.isArray(rawArtist)) {
+    artist = rawArtist.map((a: any) =>
+      typeof a === 'string' ? { name: a } : { name: a?.name || 'Unknown Artist', artistId: a?.artistId }
+    );
+  } else if (typeof rawArtist === 'object' && rawArtist !== null) {
+    artist = { name: rawArtist.name || 'Unknown Artist', artistId: rawArtist.artistId };
+  } else if (typeof rawArtist === 'string') {
+    artist = { name: rawArtist };
+  }
+
+  let thumbnails = [{ url: 'https://picsum.photos/300/300', width: 300, height: 300 }];
+  const rawThumb = raw.thumbnails || raw.thumbnail || (raw.track && (raw.track.thumbnails || raw.track.thumbnail));
+  if (Array.isArray(rawThumb) && rawThumb.length > 0) {
+    thumbnails = rawThumb.map((t: any) =>
+      typeof t === 'string' ? { url: t, width: 300, height: 300 } : { url: t.url || '', width: t.width || 300, height: t.height || 300 }
+    );
+  } else if (rawThumb) {
+    thumbnails = [{ url: typeof rawThumb === 'string' ? rawThumb : rawThumb.url || '', width: 300, height: 300 }];
+  }
+
+  let duration: number | undefined = undefined;
+  const rawDur = raw.duration || (raw.track && raw.track.duration);
+  if (typeof rawDur === 'number') {
+    duration = rawDur;
+  } else if (typeof rawDur === 'string') {
+    const parts = rawDur.split(':').map(Number);
+    if (parts.length === 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
+      duration = parts[0] * 60 + parts[1];
+    } else if (parts.length === 3 && !isNaN(parts[0]) && !isNaN(parts[1]) && !isNaN(parts[2])) {
+      duration = parts[0] * 3600 + parts[1] * 60 + parts[2];
+    }
+  }
+
+  return {
+    videoId,
+    name,
+    artist,
+    thumbnails,
+    duration,
+    isExplicit: !!(raw.isExplicit || (raw.track && raw.track.isExplicit)),
+  };
+}
+
+interface PlayerState {
+  currentTrack: Track | null;
+  queue: Track[];
+  queueIndex: number;
+  isPlaying: boolean;
+  isBuffering: boolean;
+  isExpanded: boolean;
+  volume: number;
+  progress: number;
+  duration: number;
+  playContext: 'playlist' | 'similar';
+  trackToAdd: Track | null;
+  history: HistoryItem[];
+  playCounts: Record<string, number>;
+  dominantColor: string | null;
+
+  originalQueue: Track[];
+  isShuffle: boolean;
+  repeatMode: 'off' | 'all' | 'one';
+
+  playTrack: (track: any, queue?: any[], context?: 'playlist' | 'similar', forceIndex?: number) => void;
+  playNext: () => Promise<void>;
+  playPrev: () => void;
+  playQueueIndex: (index: number) => void;
+  removeFromQueue: (index: number) => void;
+  clearQueue: () => void;
+  togglePlay: () => void;
+  setPlaying: (playing: boolean) => void;
+  setIsBuffering: (isBuffering: boolean) => void;
+  setExpanded: (expanded: boolean) => void;
+  setProgress: (progress: number) => void;
+  setDuration: (duration: number) => void;
+  setVolume: (volume: number) => void;
+  addToQueue: (track: any) => void;
+  setTrackToAdd: (track: any | null) => void;
+  setDominantColor: (color: string | null) => void;
+  toggleShuffle: () => void;
+  toggleRepeat: () => void;
+  clearHistory: () => void;
+  removeFromHistory: (videoId: string, playedAt?: number) => void;
+}
+
+export const usePlayerStore = create<PlayerState>()(
+  persist(
+    (set, get) => ({
+      currentTrack: null,
+      queue: [],
+      queueIndex: -1,
+      isPlaying: false,
+      isBuffering: false,
+      isExpanded: false,
+      volume: 100,
+      progress: 0,
+      duration: 0,
+      playContext: 'similar',
+      trackToAdd: null,
+      history: [],
+      playCounts: {},
+      dominantColor: null,
+
+      originalQueue: [],
+      isShuffle: false,
+      repeatMode: 'off',
+
+      playTrack: (rawTrack, rawQueue, context = 'similar', forceIndex?: number) => {
+        const targetId = extractVideoId(rawTrack);
+        if (!rawTrack || !targetId) return;
+        const track = normalizeTrack(rawTrack);
+
+        let queue = rawQueue && rawQueue.length > 0 ? rawQueue.map(normalizeTrack) : undefined;
+
+        const state = get();
+        const newHistoryItem: HistoryItem = { track, playedAt: Date.now() };
+
+        const filteredHistory = state.history.filter((h) => h.track.videoId !== track.videoId);
+        const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+
+        const newPlayCounts = { ...state.playCounts };
+        newPlayCounts[track.videoId] = (newPlayCounts[track.videoId] || 0) + 1;
+
+        let newQueue = queue || [track];
+        
+        let newIndex = -1;
+        if (typeof forceIndex === 'number' && forceIndex >= 0 && forceIndex < newQueue.length) {
+          newIndex = forceIndex;
+          newQueue[newIndex] = track;
+        } else {
+          newIndex = newQueue.findIndex((t) => t.videoId === track.videoId);
+          if (newIndex === -1 && track.name) {
+            newIndex = newQueue.findIndex((t) => t.name.toLowerCase() === track.name.toLowerCase());
+          }
+        }
+
+        // If track is still not in queue, insert it at beginning
+        if (newIndex === -1) {
+          newQueue = [track, ...newQueue];
+          newIndex = 0;
+        }
+
+        const originalQueue = [...newQueue];
+
+        if (state.isShuffle && newQueue.length > 1) {
+          const current = newQueue[newIndex];
+          const others = newQueue.filter((_, i) => i !== newIndex);
+          for (let i = others.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [others[i], others[j]] = [others[j], others[i]];
+          }
+          newQueue = [current, ...others];
+          newIndex = 0;
+        }
+
+        set({
+          currentTrack: track,
+          isPlaying: true,
+          queue: newQueue,
+          originalQueue: originalQueue,
+          queueIndex: newIndex,
+          progress: 0,
+          playContext: context,
+          history: newHistory,
+          playCounts: newPlayCounts,
+        });
+      },
+
+      playNext: async () => {
+        const { queue, queueIndex, playContext, currentTrack, repeatMode } = get();
+        if (queueIndex < queue.length - 1) {
+          const nextIndex = queueIndex + 1;
+          const nextTrack = queue[nextIndex];
+
+          const state = get();
+          const newHistoryItem = { track: nextTrack, playedAt: Date.now() };
+          const filteredHistory = state.history.filter((h) => h.track.videoId !== nextTrack.videoId);
+          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+
+          const newPlayCounts = { ...state.playCounts };
+          newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
+
+          set({
+            currentTrack: nextTrack,
+            queueIndex: nextIndex,
+            isPlaying: true,
+            progress: 0,
+            history: newHistory,
+            playCounts: newPlayCounts,
+          });
+        } else if (repeatMode === 'all' && queue.length > 0) {
+          const nextIndex = 0;
+          const nextTrack = queue[nextIndex];
+
+          const state = get();
+          const newHistoryItem = { track: nextTrack, playedAt: Date.now() };
+          const filteredHistory = state.history.filter((h) => h.track.videoId !== nextTrack.videoId);
+          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+
+          const newPlayCounts = { ...state.playCounts };
+          newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
+
+          set({
+            currentTrack: nextTrack,
+            queueIndex: nextIndex,
+            isPlaying: true,
+            progress: 0,
+            history: newHistory,
+            playCounts: newPlayCounts,
+          });
+        } else {
+          if (playContext === 'similar' && currentTrack && currentTrack.videoId) {
+            try {
+              const res = await fetch(`/api/upnext?id=${currentTrack.videoId}`);
+              if (!res.ok) {
+                set({ isPlaying: false, progress: 0 });
+                return;
+              }
+              const data = await res.json();
+              if (Array.isArray(data) && data.length > 0) {
+                const nextTracks = data
+                  .filter((t: any) => {
+                    const id = extractVideoId(t);
+                    return id && id !== currentTrack.videoId;
+                  })
+                  .map(normalizeTrack);
+
+                if (nextTracks.length > 0) {
+                  const nextTrack = nextTracks[0];
+
+                  const state = get();
+                  const newHistoryItem = { track: nextTrack, playedAt: Date.now() };
+                  const filteredHistory = state.history.filter((h) => h.track.videoId !== nextTrack.videoId);
+                  const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+
+                  const newPlayCounts = { ...state.playCounts };
+                  newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
+
+                  let finalNextTracks = nextTracks;
+                  if (state.isShuffle) {
+                    const others = nextTracks.slice(1);
+                    for (let i = others.length - 1; i > 0; i--) {
+                      const j = Math.floor(Math.random() * (i + 1));
+                      [others[i], others[j]] = [others[j], others[i]];
+                    }
+                    finalNextTracks = [nextTrack, ...others];
+                  }
+
+                  set({
+                    queue: [...queue, ...finalNextTracks],
+                    originalQueue: state.originalQueue.length > 0 ? [...state.originalQueue, ...nextTracks] : [],
+                    currentTrack: nextTrack,
+                    queueIndex: queueIndex + 1,
+                    isPlaying: true,
+                    progress: 0,
+                    history: newHistory,
+                    playCounts: newPlayCounts,
+                  });
+                  return;
+                }
+              }
+            } catch (e) {
+              console.error('Error fetching up next tracks:', e);
+            }
+          }
+          set({ isPlaying: false, progress: 0 });
+        }
+      },
+
+      playPrev: () => {
+        const { queue, queueIndex, progress, repeatMode } = get();
+        if (progress > 3) {
+          set({ progress: 0 });
+          return;
+        }
+        if (queueIndex > 0) {
+          const prevIndex = queueIndex - 1;
+          const prevTrack = queue[prevIndex];
+
+          const state = get();
+          const newHistoryItem = { track: prevTrack, playedAt: Date.now() };
+          const filteredHistory = state.history.filter((h) => h.track.videoId !== prevTrack.videoId);
+          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+
+          const newPlayCounts = { ...state.playCounts };
+          newPlayCounts[prevTrack.videoId] = (newPlayCounts[prevTrack.videoId] || 0) + 1;
+
+          set({
+            currentTrack: prevTrack,
+            queueIndex: prevIndex,
+            isPlaying: true,
+            progress: 0,
+            history: newHistory,
+            playCounts: newPlayCounts,
+          });
+        } else if (repeatMode === 'all' && queue.length > 0) {
+          const prevIndex = queue.length - 1;
+          const prevTrack = queue[prevIndex];
+
+          const state = get();
+          const newHistoryItem = { track: prevTrack, playedAt: Date.now() };
+          const filteredHistory = state.history.filter((h) => h.track.videoId !== prevTrack.videoId);
+          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+
+          const newPlayCounts = { ...state.playCounts };
+          newPlayCounts[prevTrack.videoId] = (newPlayCounts[prevTrack.videoId] || 0) + 1;
+
+          set({
+            currentTrack: prevTrack,
+            queueIndex: prevIndex,
+            isPlaying: true,
+            progress: 0,
+            history: newHistory,
+            playCounts: newPlayCounts,
+          });
+        } else {
+          set({ progress: 0 });
+        }
+      },
+
+      playQueueIndex: (index: number) => {
+        const state = get();
+        if (index < 0 || index >= state.queue.length) return;
+        const targetTrack = state.queue[index];
+
+        const newHistoryItem = { track: targetTrack, playedAt: Date.now() };
+        const filteredHistory = state.history.filter((h) => h.track.videoId !== targetTrack.videoId);
+        const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+
+        const newPlayCounts = { ...state.playCounts };
+        newPlayCounts[targetTrack.videoId] = (newPlayCounts[targetTrack.videoId] || 0) + 1;
+
+        set({
+          currentTrack: targetTrack,
+          queueIndex: index,
+          isPlaying: true,
+          progress: 0,
+          history: newHistory,
+          playCounts: newPlayCounts,
+        });
+      },
+
+      removeFromQueue: (index: number) => {
+        const state = get();
+        if (index < 0 || index >= state.queue.length) return;
+        const newQueue = state.queue.filter((_, i) => i !== index);
+        let newIndex = state.queueIndex;
+        if (index < state.queueIndex) {
+          newIndex = Math.max(0, state.queueIndex - 1);
+        } else if (index === state.queueIndex) {
+          if (newQueue.length === 0) {
+            set({ queue: [], queueIndex: -1, currentTrack: null, isPlaying: false, progress: 0 });
+            return;
+          }
+          newIndex = Math.min(state.queueIndex, newQueue.length - 1);
+          set({
+            queue: newQueue,
+            queueIndex: newIndex,
+            currentTrack: newQueue[newIndex],
+            progress: 0,
+          });
+          return;
+        }
+        set({ queue: newQueue, queueIndex: newIndex });
+      },
+
+      clearQueue: () => {
+        const state = get();
+        if (state.currentTrack) {
+          set({
+            queue: [state.currentTrack],
+            originalQueue: [state.currentTrack],
+            queueIndex: 0,
+          });
+        } else {
+          set({ queue: [], originalQueue: [], queueIndex: -1 });
+        }
+        toast.info('Antrean dibersihkan');
+      },
+
+      togglePlay: () => set((state) => ({ isPlaying: !state.isPlaying })),
+      setPlaying: (playing) => set({ isPlaying: playing }),
+      setIsBuffering: (isBuffering) => set({ isBuffering }),
+      setExpanded: (expanded) => set({ isExpanded: expanded }),
+      setProgress: (progress) => set({ progress }),
+      setDuration: (duration) => set({ duration }),
+      setVolume: (volume) => set({ volume }),
+      addToQueue: (rawTrack) => {
+        const id = extractVideoId(rawTrack);
+        if (!rawTrack || !id) return;
+        const track = normalizeTrack(rawTrack);
+        set((state) => ({
+          queue: [...state.queue, track],
+          originalQueue: state.originalQueue.length > 0 ? [...state.originalQueue, track] : [track],
+        }));
+        toast.success(`"${track.name}" ditambahkan ke antrean`);
+      },
+      setTrackToAdd: (rawTrack) => {
+        const id = extractVideoId(rawTrack);
+        const track = rawTrack && id ? normalizeTrack(rawTrack) : null;
+        set({ trackToAdd: track });
+      },
+      setDominantColor: (color) => set({ dominantColor: color }),
+      toggleShuffle: () => {
+        const state = get();
+        const newIsShuffle = !state.isShuffle;
+        if (newIsShuffle) {
+          const current = state.queue[state.queueIndex];
+          const others = state.queue.filter((_, i) => i !== state.queueIndex);
+          for (let i = others.length - 1; i > 0; i--) {
+            const j = Math.floor(Math.random() * (i + 1));
+            [others[i], others[j]] = [others[j], others[i]];
+          }
+          const newQueue = current ? [current, ...others] : others;
+          set({
+            isShuffle: true,
+            originalQueue: state.queue,
+            queue: newQueue,
+            queueIndex: current ? 0 : -1,
+          });
+          toast.info('Putar acak diaktifkan');
+        } else {
+          const current = state.queue[state.queueIndex];
+          const newQueue = state.originalQueue.length > 0 ? state.originalQueue : state.queue;
+          let newIndex = newQueue.findIndex((t) => t.videoId === current?.videoId);
+          if (newIndex === -1) newIndex = 0;
+          set({
+            isShuffle: false,
+            queue: newQueue,
+            queueIndex: newIndex,
+          });
+          toast.info('Putar acak dinonaktifkan');
+        }
+      },
+      toggleRepeat: () =>
+        set((state) => {
+          const nextMode = state.repeatMode === 'off' ? 'all' : state.repeatMode === 'all' ? 'one' : 'off';
+          if (nextMode === 'all') {
+            toast.info('Ulangi semua lagu');
+          } else if (nextMode === 'one') {
+            toast.info('Ulangi lagu ini');
+          } else {
+            toast.info('Pengulangan dimatikan');
+          }
+          return { repeatMode: nextMode };
+        }),
+      clearHistory: () => {
+        set({ history: [] });
+        toast.info('Riwayat putar telah dibersihkan');
+      },
+      removeFromHistory: (videoId: string, playedAt?: number) =>
+        set((state) => ({
+          history: state.history.filter((item) => {
+            if (playedAt !== undefined) {
+              return !(item.track.videoId === videoId && item.playedAt === playedAt);
+            }
+            return item.track.videoId !== videoId;
+          }),
+        })),
+    }),
+    {
+      name: 'player-storage',
+      partialize: (state) => ({
+        history: state.history,
+        playCounts: state.playCounts,
+        volume: state.volume,
+        isShuffle: state.isShuffle,
+        repeatMode: state.repeatMode,
+      }),
+    }
+  )
+);
