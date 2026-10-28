@@ -205,7 +205,12 @@ export function Player() {
       const isCurrentlyDownloaded = isDownloaded;
 
       // Always activate loading spinner prior to async operations
-      setIsDownloading(true);
+      // Prevent download attempts when browser is completely offline
+      if (typeof navigator !== 'undefined' && !navigator.onLine && !isCurrentlyDownloaded) {
+        toast.error('Gagal mengunduh: Terkendala koneksi server ke sumber audio (Koneksi offline)');
+        setIsDownloading(false);
+        return;
+      }
 
       try {
         if (isCurrentlyDownloaded) {
@@ -232,12 +237,24 @@ export function Player() {
         }
       } catch (err: any) {
         console.error('Download toggle error:', err);
-        const errMsg =
-          err?.name === 'AbortError'
-            ? 'Unduhan terputus atau batas waktu habis (timeout)'
-            : err?.name === 'QuotaExceededError'
-            ? 'Memori penyimpanan browser HP penuh (Quota Exceeded)'
-            : err?.message || 'Gagal mengunduh lagu offline';
+        let errMsg = 'Gagal mengunduh: Terkendala koneksi server ke sumber audio';
+
+        const rawMsg = typeof err === 'string' ? err : err?.message || '';
+        if (err?.name === 'AbortError' || rawMsg.includes('timeout') || rawMsg.includes('batas waktu')) {
+          errMsg = 'Gagal mengunduh: Batas waktu habis (timeout). Server membutuhkan waktu lebih lama.';
+        } else if (err?.name === 'QuotaExceededError' || rawMsg.includes('Quota')) {
+          errMsg = 'Gagal mengunduh: Memori penyimpanan browser HP penuh (Quota Exceeded)';
+        } else if (
+          rawMsg.includes('Failed to fetch') ||
+          rawMsg.includes('NetworkError') ||
+          rawMsg.includes('koneksi') ||
+          (typeof navigator !== 'undefined' && !navigator.onLine)
+        ) {
+          errMsg = 'Gagal mengunduh: Terkendala koneksi server ke sumber audio';
+        } else if (rawMsg) {
+          errMsg = rawMsg.startsWith('Gagal mengunduh') ? rawMsg : `Gagal mengunduh: ${rawMsg}`;
+        }
+
         toast.error(errMsg);
       } finally {
         // ALWAYS executed: guarantees spinner stops immediately on success, cancellation, or failure

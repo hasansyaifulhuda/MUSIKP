@@ -108,14 +108,35 @@ export async function GET(request: Request) {
         `[DownloadAPI] ❌ Upstream audio fetch returned status ${upstreamResponse.status} for "${videoId}"`
       );
       return createErrorResponse(
-        `Sumber audio upstream mengembalikan status error (${upstreamResponse.status})`,
+        `Sumber audio upstream mengembalikan status error (HTTP ${upstreamResponse.status})`,
+        upstreamResponse.status >= 500 ? 502 : upstreamResponse.status,
+        { upstreamStatus: upstreamResponse.status, videoId }
+      );
+    }
+
+    const rawContentType = upstreamResponse.headers.get('content-type') || '';
+    if (rawContentType.includes('text/html') || rawContentType.includes('application/json')) {
+      console.error(
+        `[DownloadAPI] ❌ Upstream returned non-audio content-type "${rawContentType}" for "${videoId}"`
+      );
+      return createErrorResponse(
+        'Sumber audio upstream mengembalikan respons bukan audio (mungkin bot verification atau URL kedaluwarsa)',
         502,
-        { upstreamStatus: upstreamResponse.status }
+        { upstreamContentType: rawContentType, videoId }
+      );
+    }
+
+    if (!upstreamResponse.body) {
+      console.error(`[DownloadAPI] ❌ Upstream audio stream body is null for "${videoId}"`);
+      return createErrorResponse(
+        'Data stream audio upstream tidak tersedia atau kosong',
+        502,
+        { videoId }
       );
     }
 
     const responseHeaders = new Headers();
-    const contentType = upstreamResponse.headers.get('content-type') || 'audio/mpeg';
+    const contentType = rawContentType || 'audio/mpeg';
     responseHeaders.set('Content-Type', contentType);
     responseHeaders.set('Accept-Ranges', 'bytes');
     responseHeaders.set('Cache-Control', 'public, max-age=14400');
@@ -143,9 +164,16 @@ export async function GET(request: Request) {
       `[DownloadAPI] 🚫 Critical error downloading audio for id "${videoId}":\n` +
       (error?.stack || error?.message || error)
     );
+    const statusCode =
+      typeof error?.status === 'number' && error.status >= 400 && error.status < 600
+        ? error.status
+        : error?.code === 'ETIMEDOUT'
+        ? 504
+        : 500;
+
     return createErrorResponse(
-      error?.message || 'Proses unduhan file audio gagal atau melebihi batas waktu server.',
-      503,
+      error?.message || 'Proses unduhan file audio gagal atau terkendala koneksi ke sumber audio.',
+      statusCode,
       { videoId, retryable: true, details: error?.message }
     );
   }

@@ -176,18 +176,39 @@ export async function GET(request: Request) {
     });
 
     if (!upstreamResponse.ok && upstreamResponse.status !== 206) {
-      console.warn(
-        `[StreamRoute] Upstream audio fetch returned status ${upstreamResponse.status} for id ${videoId}`
+      console.error(
+        `[StreamRoute] ❌ Upstream audio fetch returned status ${upstreamResponse.status} for id ${videoId}`
       );
       return createErrorResponse(
-        `Upstream media source returned an error (status: ${upstreamResponse.status})`,
+        `Sumber audio upstream mengembalikan status error (HTTP ${upstreamResponse.status})`,
+        upstreamResponse.status >= 500 ? 502 : upstreamResponse.status,
+        { upstreamStatus: upstreamResponse.status, videoId }
+      );
+    }
+
+    const rawContentType = upstreamResponse.headers.get('content-type') || '';
+    if (rawContentType.includes('text/html') || rawContentType.includes('application/json')) {
+      console.error(
+        `[StreamRoute] ❌ Upstream returned non-audio content-type "${rawContentType}" for id ${videoId}`
+      );
+      return createErrorResponse(
+        'Sumber audio upstream mengembalikan respons bukan audio (URL kedaluwarsa atau bot check)',
         502,
-        { upstreamStatus: upstreamResponse.status }
+        { upstreamContentType: rawContentType, videoId }
+      );
+    }
+
+    if (!upstreamResponse.body) {
+      console.error(`[StreamRoute] ❌ Upstream audio stream body is null for id ${videoId}`);
+      return createErrorResponse(
+        'Data stream audio upstream tidak tersedia atau kosong',
+        502,
+        { videoId }
       );
     }
 
     const responseHeaders = new Headers();
-    const contentType = upstreamResponse.headers.get('content-type') || 'audio/mp4';
+    const contentType = rawContentType || 'audio/mp4';
     responseHeaders.set('Content-Type', contentType);
     responseHeaders.set('Accept-Ranges', 'bytes');
     responseHeaders.set('Cache-Control', 'public, max-age=14400, stale-while-revalidate=86400');
@@ -220,9 +241,16 @@ export async function GET(request: Request) {
       `[StreamRoute] ❌ Critical error resolving audio for id "${videoId}":\n` +
       (error?.stack || error?.message || error)
     );
+    const statusCode =
+      typeof error?.status === 'number' && error.status >= 400 && error.status < 600
+        ? error.status
+        : error?.code === 'ETIMEDOUT'
+        ? 504
+        : 500;
+
     return createErrorResponse(
-      error?.message || 'Audio stream sementara tidak dapat diakses untuk lagu ini.',
-      503,
+      error?.message || 'Gagal memproses audio stream: Terkendala koneksi server ke sumber audio.',
+      statusCode,
       { videoId, retryable: true, details: error?.message }
     );
   }

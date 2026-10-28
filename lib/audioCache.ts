@@ -111,7 +111,13 @@ class AudioCacheManager {
     videoId: string,
     options?: { asAttachment?: boolean; filename?: string }
   ): Response {
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`Berkas audio cache tidak ditemukan: ${filePath}`);
+    }
     const stat = fs.statSync(filePath);
+    if (!stat.isFile() || stat.size < 1024) {
+      throw new Error(`Berkas audio cache tidak valid atau berukuran kosong (${stat.size} bytes)`);
+    }
     const totalSize = stat.size;
     const rangeHeader = request.headers.get('range');
 

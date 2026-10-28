@@ -560,25 +560,47 @@ export const db = {
       // 150-second overall timeout to allow VPS ample time to fetch, convert, and stream audio from YouTube
       const timeout = setTimeout(() => controller.abort(), 150000);
       try {
-        const res = await fetch(`/api/stream?id=${encodeURIComponent(track.videoId)}`, {
-          signal: controller.signal,
-        });
+        let res: Response;
+        try {
+          res = await fetch(`/api/stream?id=${encodeURIComponent(track.videoId)}&download=true`, {
+            signal: controller.signal,
+          });
+        } catch (fetchErr: any) {
+          if (fetchErr?.name === 'AbortError') {
+            throw new Error('Unduhan melebihi batas waktu (timeout). Server atau jaringan membutuhkan waktu lebih lama.');
+          }
+          // Catch 'Failed to fetch', connection drops, and network errors
+          throw new Error('Terkendala koneksi server ke sumber audio (Failed to fetch)');
+        }
 
+        // Validate HTTP response code
         if (!res.ok) {
-          let errorMsg = `HTTP ${res.status}`;
+          let errorMsg = `Server error (HTTP ${res.status})`;
           try {
             const errJson = await res.json();
             if (errJson?.message) {
               errorMsg = errJson.message;
             }
           } catch {}
-          throw new Error(`Gagal mengunduh audio (${errorMsg})`);
+          throw new Error(errorMsg);
         }
 
-        const contentType = res.headers.get('content-type') || 'audio/mpeg';
+        // Validate Content-Type: guarantee it is an audio stream, NOT a JSON error or HTML stub
+        const contentType = res.headers.get('content-type') || '';
+        if (contentType.includes('application/json') || contentType.includes('text/html')) {
+          let detail = 'Sumber audio mengembalikan format tidak valid (bukan file audio)';
+          try {
+            const errJson = await res.json();
+            if (errJson?.message) {
+              detail = errJson.message;
+            }
+          } catch {}
+          throw new Error(detail);
+        }
+
         const rawBlob = await res.blob();
-        if (!rawBlob || rawBlob.size === 0) {
-          throw new Error('Data audio kosong atau unduhan terputus dari server');
+        if (!rawBlob || rawBlob.size < 1024) {
+          throw new Error('Data audio kosong atau unduhan terputus dari server (<1KB)');
         }
 
         // Guarantee that the raw audio is stored as an actual Blob with valid audio MIME type
@@ -597,8 +619,8 @@ export const db = {
     }
 
     // Verify audioBlob is an authentic, non-empty binary Blob (NOT a temporary object URL string)
-    if (!(audioBlob instanceof Blob) || audioBlob.size === 0) {
-      throw new Error('Data audio tidak valid: file audio harus berformat binary Blob utuh.');
+    if (!(audioBlob instanceof Blob) || audioBlob.size < 1024) {
+      throw new Error('Data audio tidak valid: file audio harus berformat binary Blob utuh (>1KB).');
     }
 
     const item: OfflineTrack = {
