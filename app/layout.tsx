@@ -115,7 +115,9 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           <BackgroundProvider />
           
           {/* Desktop Fixed Left Navigation */}
-          <Sidebar />
+          <ErrorBoundary name="Sidebar" fallback={null}>
+            <Sidebar />
+          </ErrorBoundary>
 
           {/* Main Content Viewport */}
           <div className="md:pl-64 lg:pl-72 md:p-2 min-h-screen">
@@ -132,10 +134,14 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           </ErrorBoundary>
 
           {/* Mobile Bottom Navigation Bar */}
-          <BottomNav />
+          <ErrorBoundary name="BottomNav" fallback={null}>
+            <BottomNav />
+          </ErrorBoundary>
 
           {/* Lazily Loaded Client Modals, PWA & Toasts */}
-          <ClientModals />
+          <ErrorBoundary name="ClientModals" fallback={null}>
+            <ClientModals />
+          </ErrorBoundary>
         </MusicProvider>
       </body>
     </html>

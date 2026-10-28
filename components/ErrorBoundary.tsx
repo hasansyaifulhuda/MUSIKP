@@ -30,6 +30,18 @@ export class ErrorBoundary extends Component<Props, State> {
     return { hasError: true, error };
   }
 
+  public componentDidMount() {
+    if (typeof window !== 'undefined') {
+      window.addEventListener('popstate', this.handleReset);
+    }
+  }
+
+  public componentWillUnmount() {
+    if (typeof window !== 'undefined') {
+      window.removeEventListener('popstate', this.handleReset);
+    }
+  }
+
   public componentDidCatch(error: Error, errorInfo: ErrorInfo) {
     console.error(`[ErrorBoundary:${this.props.name || 'Global'}] Caught error:`, error, errorInfo);
   }
@@ -41,7 +53,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
   public render() {
     if (this.state.hasError) {
-      if (this.props.fallback) {
+      if (this.props.fallback !== undefined) {
         return this.props.fallback;
       }
 

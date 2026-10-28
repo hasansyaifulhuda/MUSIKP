@@ -35,7 +35,7 @@ import Image from 'next/image';
 import { useRouter } from 'next/navigation';
 import { MarqueeText } from './MarqueeText';
 import { toast } from '@/lib/toast';
-import { LyricLine } from './LyricsView';
+import { LyricLine, normalizeLyrics } from '@/lib/performance';
 import { useMusic } from '@/context/MusicContext';
 import {
   MiniPlayerProgressBar,
@@ -98,12 +98,14 @@ export function Player() {
     if (currentTrack?.videoId) {
       db.getOfflineTrack(currentTrack.videoId).then((offlineItem) => {
         if (active) {
-          setIsDownloaded(Boolean(offlineItem));
+          setIsDownloaded(Boolean(offlineItem && offlineItem.blob));
         }
       });
     } else {
       setIsDownloaded(false);
     }
+    // Prevent infinite spinning if user changed track during download
+    setIsDownloading(false);
     return () => {
       active = false;
     };
@@ -145,7 +147,8 @@ export function Player() {
         if (!isCancelled) {
           const payload = data?.result !== undefined ? data.result : data;
           if (Array.isArray(payload?.lyrics) && payload.lyrics.length > 0) {
-            setLyrics(payload.lyrics);
+            const cleanLyrics = normalizeLyrics(payload.lyrics, dur);
+            setLyrics(cleanLyrics);
             setIsSyncedLyrics(Boolean(payload.synced));
           } else {
             setLyrics([]);
@@ -197,22 +200,47 @@ export function Player() {
     async (e?: React.MouseEvent) => {
       if (e) e.stopPropagation();
       if (!currentTrack || isDownloading) return;
+
+      const trackToProcess = currentTrack;
+      const isCurrentlyDownloaded = isDownloaded;
+
+      // Always activate loading spinner prior to async operations
+      setIsDownloading(true);
+
       try {
-        if (isDownloaded) {
-          await db.removeOfflineTrack(currentTrack.videoId);
+        if (isCurrentlyDownloaded) {
+          await db.removeOfflineTrack(trackToProcess.videoId);
           setIsDownloaded(false);
           toast.info('Lagu dihapus dari penyimpanan offline');
         } else {
-          setIsDownloading(true);
+          // Request persistent storage from browser when user initiates an offline download
+          if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.persist) {
+            navigator.storage.persist().then((granted) => {
+              if (granted) {
+                console.log('Storage will not be cleared except by explicit user action');
+              }
+            }).catch(() => {});
+          }
+
           toast.info('Mengunduh lagu untuk offline...');
-          await db.saveOfflineTrack(currentTrack);
+          const result = await db.saveOfflineTrack(trackToProcess);
+          if (!result || !result.blob) {
+            throw new Error('Gagal menyimpan file audio atau data unduhan tidak lengkap');
+          }
           setIsDownloaded(true);
           toast.success('Lagu tersimpan untuk offline');
         }
-      } catch (err) {
+      } catch (err: any) {
         console.error('Download toggle error:', err);
-        toast.error('Gagal mengunduh lagu');
+        const errMsg =
+          err?.name === 'AbortError'
+            ? 'Unduhan terputus atau batas waktu habis (timeout)'
+            : err?.name === 'QuotaExceededError'
+            ? 'Memori penyimpanan browser HP penuh (Quota Exceeded)'
+            : err?.message || 'Gagal mengunduh lagu offline';
+        toast.error(errMsg);
       } finally {
+        // ALWAYS executed: guarantees spinner stops immediately on success, cancellation, or failure
         setIsDownloading(false);
       }
     },

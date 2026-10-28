@@ -8,9 +8,8 @@ const CORE_ASSETS = [
   '/icon.png',
 ];
 
-// 1. Install Event: Cache critical shell assets safely
+// 1. Install Event: Cache critical shell assets safely without aggressive skipWaiting
 self.addEventListener('install', (event) => {
-  self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
       // Use individual catches so any single missing asset does NOT fail the entire installation
@@ -21,21 +20,19 @@ self.addEventListener('install', (event) => {
   );
 });
 
-// 2. Activate Event: Clean up outdated caches and claim all clients immediately
+// 2. Activate Event: Clean up outdated caches quietly in the background
+// Intentionally omitted self.clients.claim() to prevent abrupt tab reloads or stream disconnects
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    Promise.all([
-      caches.keys().then((keys) => {
-        return Promise.all(
-          keys.map((key) => {
-            if (key !== CACHE_NAME) {
-              return caches.delete(key);
-            }
-          })
-        );
-      }),
-      self.clients.claim(),
-    ])
+    caches.keys().then((keys) => {
+      return Promise.all(
+        keys.map((key) => {
+          if (key !== CACHE_NAME) {
+            return caches.delete(key);
+          }
+        })
+      );
+    })
   );
 });
 

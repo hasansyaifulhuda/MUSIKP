@@ -10,21 +10,46 @@ interface LyricLine {
 const lyricsCache = new MemoryCache<{ synced: boolean; lyrics: LyricLine[] }>(600, 1000 * 60 * 60 * 24);
 
 function parseLRC(lrcText: string): LyricLine[] {
+  if (!lrcText) return [];
   const lines = lrcText.split('\n');
   const result: LyricLine[] = [];
-  const regex = /\[(\d{2}):(\d{2}(?:\.\d+)?)\](.*)/;
+
+  let offsetSeconds = 0;
+  // Parse global [offset:+/-ms] tag if present
+  const offsetMatch = lrcText.match(/\[offset:\s*([+-]?\d+)\s*\]/i);
+  if (offsetMatch) {
+    const ms = parseInt(offsetMatch[1], 10);
+    if (!isNaN(ms)) {
+      offsetSeconds = ms / 1000;
+    }
+  }
+
+  // Matches timestamps like [01:23.45], [01:23:45], [01:23], [1:23.4]
+  const tagRegex = /\[(\d{1,3}):(\d{2})(?:[.:](\d{1,3}))?\]/g;
 
   for (const line of lines) {
-    const match = line.match(regex);
-    if (match) {
-      const minutes = parseFloat(match[1]);
-      const seconds = parseFloat(match[2]);
-      const text = match[3].trim();
+    const trimmed = line.trim();
+    if (!trimmed) continue;
+    // Skip metadata headers
+    if (/^\[(ti|ar|al|by|offset|length|re|ve):/i.test(trimmed)) {
+      continue;
+    }
+
+    const matches = Array.from(trimmed.matchAll(tagRegex));
+    if (matches.length > 0) {
+      const text = trimmed.replace(tagRegex, '').trim();
       if (text) {
-        result.push({
-          time: Math.round((minutes * 60 + seconds) * 100) / 100,
-          text,
-        });
+        for (const match of matches) {
+          const minutes = parseFloat(match[1]);
+          const seconds = parseFloat(match[2]);
+          const msStr = match[3] || '0';
+          const ms = parseFloat(msStr) / Math.pow(10, msStr.length);
+          const totalSeconds = Math.max(0, minutes * 60 + seconds + ms + offsetSeconds);
+          result.push({
+            time: Math.round(totalSeconds * 100) / 100,
+            text,
+          });
+        }
       }
     }
   }

@@ -5,7 +5,8 @@ import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { ArrowLeft, DownloadCloud, Play, Trash2, CheckCircle2, Music } from 'lucide-react';
 import { db, OfflineTrack } from '@/lib/db';
-import { usePlayerStore, Track } from '@/lib/store';
+import { Track } from '@/lib/store';
+import { useMusic } from '@/context/MusicContext';
 import { getHighResImage } from '@/lib/utils';
 import { toast } from '@/lib/toast';
 import { MarqueeText } from '@/components/MarqueeText';
@@ -15,9 +16,7 @@ export default function DownloadPage() {
   const [offlineTracks, setOfflineTracks] = useState<OfflineTrack[]>([]);
   const [loading, setLoading] = useState(true);
 
-  const playTrack = usePlayerStore((state) => state.playTrack);
-  const currentTrack = usePlayerStore((state) => state.currentTrack);
-  const isPlaying = usePlayerStore((state) => state.isPlaying);
+  const { playTrack, currentTrack, isPlaying } = useMusic();
 
   const loadOfflineTracks = async () => {
     try {

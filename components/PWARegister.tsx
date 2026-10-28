@@ -21,18 +21,10 @@ export function PWARegister() {
       });
     }
 
+    // Register service worker cleanly without aggressive update loops
     if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
-      navigator.serviceWorker.getRegistrations().then((registrations) => {
-        for (const reg of registrations) {
-          reg.update().catch(() => {});
-        }
-      });
-
       navigator.serviceWorker
         .register('/sw.js')
-        .then((reg) => {
-          reg.update().catch(() => {});
-        })
         .catch(() => {
           // Non-blocking fallback for restricted or unsupported Service Worker contexts
         });

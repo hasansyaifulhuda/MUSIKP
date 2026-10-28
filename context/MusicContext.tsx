@@ -84,6 +84,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   // Local State & Audio Control Refs
   const [isMuted, setIsMuted] = useState<boolean>(false);
+  const isMutedRef = useRef<boolean>(isMuted);
+  isMutedRef.current = isMuted;
   const isSeekingLockRef = useRef<boolean>(false);
   const seekLockTimerRef = useRef<NodeJS.Timeout | null>(null);
   const loadedTrackIdRef = useRef<string | null>(null);
@@ -97,6 +99,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // User gesture & playback failure safeguards
   const hasUserGestureRef = useRef<boolean>(false);
   const retryCountPerTrackRef = useRef<Map<string, number>>(new Map());
+  const retryTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastErrorTimestampRef = useRef<number>(0);
 
   // Safely register physical user gesture (click/touch/key) to allow AudioContext creation
@@ -123,6 +126,31 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       activeBlobUrlRef.current = null;
     }
   }, []);
+
+  // Component unmount & resource cleanup (prevents memory leak & OOM crashes on mobile)
+  useEffect(() => {
+    return () => {
+      cleanupActiveBlobUrl();
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
+      if (wakeLockRef.current) {
+        try {
+          wakeLockRef.current.release();
+        } catch {}
+        wakeLockRef.current = null;
+      }
+      if (audioContextRef.current) {
+        try {
+          if (audioContextRef.current.state !== 'closed') {
+            audioContextRef.current.close().catch(() => {});
+          }
+        } catch {}
+        audioContextRef.current = null;
+      }
+    };
+  }, [cleanupActiveBlobUrl]);
 
   // Update MediaSession Position State (Throttled for high performance & lockscreen scrubber)
   const updateMediaSessionPosition = useCallback((curTime: number, totalDur?: number) => {
@@ -183,11 +211,22 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Declare W3C AudioSession 'playback' mode for mobile media focus (iOS & modern Android)
+  // Also request Persistent Storage and populate in-memory offline cache
   useEffect(() => {
     if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
       try {
         (navigator as any).audioSession.type = 'playback';
       } catch {}
+    }
+
+    // Proactively initialize offline cache and request persistent storage
+    db.initOfflineCache().catch(() => {});
+    if (typeof navigator !== 'undefined' && navigator.storage && navigator.storage.persist) {
+      navigator.storage.persist().then((granted) => {
+        if (granted) {
+          console.log('Storage will not be cleared except by explicit user action');
+        }
+      }).catch(() => {});
     }
   }, []);
 
@@ -199,9 +238,10 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const audio = getPersistentAudioElement();
     if (!audio) return;
 
-    // Apply initial volume & muted state
-    audio.volume = Math.max(0, Math.min(1, volume / 100));
-    audio.muted = isMuted;
+    // Apply initial volume & muted state safely
+    const initialVolume = usePlayerStore.getState().volume ?? 100;
+    audio.volume = Math.max(0, Math.min(1, initialVolume / 100));
+    audio.muted = isMutedRef.current;
 
     const handleTimeUpdate = () => {
       if (!isSeekingLockRef.current) {
@@ -283,8 +323,20 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const handleError = () => {
       setIsBuffering(false);
       const audio = getPersistentAudioElement();
-      const currentTrack = usePlayerStore.getState().currentTrack;
-      const trackId = currentTrack ? extractVideoId(currentTrack) : 'unknown';
+      const state = usePlayerStore.getState();
+      const currentTrack = state.currentTrack;
+      const trackId = currentTrack ? extractVideoId(currentTrack) : '';
+
+      // 1. Guard against empty, uninitialized, or reset audio elements
+      if (!audio || !audio.src || audio.src === '' || audio.src === window.location.href || !trackId) {
+        return;
+      }
+
+      // 2. Guard against initial mount / unprompted errors without active playback
+      // Error toast or retries MUST ONLY occur if playback was actively initiated
+      if (!hasUserGestureRef.current || !state.isPlaying) {
+        return;
+      }
 
       const now = Date.now();
       // Debounce rapid duplicate error events (within 1000ms)
@@ -296,11 +348,14 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       const retries = retryCountPerTrackRef.current.get(trackId) || 0;
 
       // Retry Limit: Allow at most 1 single retry attempt per track
-      if (retries < 1 && trackId !== 'unknown' && trackId !== '') {
+      if (retries < 1 && trackId !== '') {
         retryCountPerTrackRef.current.set(trackId, retries + 1);
         setIsBuffering(true);
 
-        setTimeout(() => {
+        if (retryTimerRef.current) {
+          clearTimeout(retryTimerRef.current);
+        }
+        retryTimerRef.current = setTimeout(() => {
           if (audio && usePlayerStore.getState().isPlaying) {
             const streamUrl = `/api/stream?id=${encodeURIComponent(trackId)}&retry=1&t=${Date.now()}`;
             audio.src = streamUrl;
@@ -331,9 +386,11 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         } catch {}
       }
 
-      // Display friendly error notification to user
-      const trackName = currentTrack?.name ? `"${currentTrack.name}"` : 'lagu ini';
-      toast.error(`Gagal memutar ${trackName}. Silakan pilih lagu lain.`);
+      // Display friendly error notification to user ONLY if user consciously initiated playback
+      if (hasUserGestureRef.current && state.isPlaying) {
+        const trackName = currentTrack?.name ? `"${currentTrack.name}"` : 'lagu ini';
+        toast.error(`Gagal memutar ${trackName}. Silakan pilih lagu lain.`);
+      }
     };
 
     audio.addEventListener('timeupdate', handleTimeUpdate);
@@ -355,7 +412,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       audio.removeEventListener('ended', handleEnded);
       audio.removeEventListener('error', handleError);
     };
-  }, [setPlayingStore, setIsBuffering, setDuration, setProgress, updateMediaSessionPosition, volume, isMuted]);
+  }, [setPlayingStore, setIsBuffering, setDuration, setProgress, updateMediaSessionPosition]);
 
   // =========================================================================
   // Playback Navigation (playNext, playPrev)
@@ -399,14 +456,55 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       if (!audio) return;
 
       loadedTrackIdRef.current = targetVid;
+      if (retryTimerRef.current) {
+        clearTimeout(retryTimerRef.current);
+        retryTimerRef.current = null;
+      }
       cleanupActiveBlobUrl();
-      setIsBuffering(true);
 
-      // 1. Immediately update audio source and initiate playback synchronously
+      // Only set buffering if autoPlay is explicitly requested by user action
+      if (autoPlay) {
+        setIsBuffering(true);
+      }
+
+      // 1. OFFLINE INDEXEDDB CHECK FIRST:
+      // If track was saved locally in IndexedDB, play directly from the local Blob!
+      // This guarantees 100% offline playback without any network request.
+      try {
+        const offlineItem = await db.getOfflineTrack(targetVid);
+        if (offlineItem?.blob && offlineItem.blob instanceof Blob && offlineItem.blob.size > 0) {
+          if (loadedTrackIdRef.current !== targetVid) return;
+
+          const blobUrl = URL.createObjectURL(offlineItem.blob);
+          activeBlobUrlRef.current = blobUrl;
+          audio.src = blobUrl;
+          audio.currentTime = 0;
+          audio.volume = Math.max(0, Math.min(1, volume / 100));
+          audio.muted = isMuted;
+          audio.load();
+
+          if (autoPlay) {
+            const playPromise = audio.play();
+            if (playPromise !== undefined) {
+              playPromise.catch(() => {});
+            }
+          }
+          setIsBuffering(false);
+          return;
+        }
+      } catch (err) {
+        console.warn('[OfflinePlay] Error reading offline track from IndexedDB:', err);
+      }
+
+      // 2. ONLINE STREAM FALLBACK:
+      // If not stored offline in IndexedDB, fetch from server stream endpoint
       const streamUrl = `/api/stream?id=${encodeURIComponent(targetVid)}`;
       const isSameSrc = audio.src === streamUrl || audio.src.endsWith(encodeURIComponent(targetVid));
 
-      if (!isSameSrc) {
+      // ONLY set audio.src and load audio if autoPlay is true!
+      // If autoPlay is false (e.g. restored from localStorage in paused state),
+      // we leave audio.src idle until user explicitly presses Play!
+      if (autoPlay && !isSameSrc) {
         audio.src = streamUrl;
         audio.currentTime = 0;
         audio.volume = Math.max(0, Math.min(1, volume / 100));
@@ -428,23 +526,6 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           }
         } catch {}
       }
-
-      // 2. Seamless offline check: if downloaded blob exists, swap to local blob
-      db.getOfflineTrack(targetVid)
-        .then((offlineItem) => {
-          if (offlineItem?.blob && loadedTrackIdRef.current === targetVid) {
-            const blobUrl = URL.createObjectURL(offlineItem.blob);
-            activeBlobUrlRef.current = blobUrl;
-            const wasPlaying = !audio.paused;
-            const curTime = audio.currentTime;
-            audio.src = blobUrl;
-            audio.currentTime = curTime;
-            if (wasPlaying) {
-              audio.play().catch(() => {});
-            }
-          }
-        })
-        .catch(() => {});
     },
     [volume, isMuted, cleanupActiveBlobUrl, setIsBuffering, setPlayingStore]
   );
@@ -505,10 +586,11 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (!currentVideoId) {
       loadedTrackIdRef.current = null;
       const audio = getPersistentAudioElement();
-      if (audio) {
+      if (audio && audio.src) {
         try {
           audio.pause();
-          audio.src = '';
+          audio.removeAttribute('src');
+          audio.load();
         } catch {}
       }
       return;
@@ -521,13 +603,21 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
+    // When the track is restored from localStorage or loaded initially in paused/ready state:
+    // DO NOT invoke stream fetch or buffering. Keep the player ready/paused until user explicitly plays.
+    if (!isPlayingStore) {
+      loadedTrackIdRef.current = currentVideoId;
+      setIsBuffering(false);
+      return;
+    }
+
     loadAndPlayTrack(currentVideoId, isPlayingStore);
-  }, [currentVideoId, loadAndPlayTrack]);
+  }, [currentVideoId, loadAndPlayTrack, setIsBuffering]);
 
   // =========================================================================
   // Playback Control Handlers (Play, Pause, Seek, Volume, Mute)
   // =========================================================================
-  const togglePlay = useCallback(() => {
+  const togglePlay = useCallback(async () => {
     hasUserGestureRef.current = true;
     initAudioContextKeepAlive();
     const audio = getPersistentAudioElement();
@@ -537,11 +627,35 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
     if (audio) {
       if (nextPlaying) {
-        if (!audio.src && currentStore.currentTrack) {
-          const vid = extractVideoId(currentStore.currentTrack);
-          if (vid) {
-            audio.src = `/api/stream?id=${encodeURIComponent(vid)}`;
-            audio.load();
+        const vid = currentStore.currentTrack ? extractVideoId(currentStore.currentTrack) : '';
+        if (vid) {
+          const isAlreadyPlayingSame =
+            audio.src &&
+            (audio.src.startsWith('blob:') ||
+              audio.src.endsWith(encodeURIComponent(vid)) ||
+              audio.src.includes(encodeURIComponent(vid)));
+
+          if (!isAlreadyPlayingSame) {
+            setIsBuffering(true);
+            const offlineItem = await db.getOfflineTrack(vid).catch(() => undefined);
+            if (offlineItem?.blob && offlineItem.blob instanceof Blob && offlineItem.blob.size > 0) {
+              cleanupActiveBlobUrl();
+              const blobUrl = URL.createObjectURL(offlineItem.blob);
+              activeBlobUrlRef.current = blobUrl;
+              audio.src = blobUrl;
+              audio.currentTime = 0;
+              audio.volume = Math.max(0, Math.min(1, volume / 100));
+              audio.muted = isMuted;
+              audio.load();
+              setIsBuffering(false);
+            } else {
+              const streamUrl = `/api/stream?id=${encodeURIComponent(vid)}`;
+              audio.src = streamUrl;
+              audio.currentTime = 0;
+              audio.volume = Math.max(0, Math.min(1, volume / 100));
+              audio.muted = isMuted;
+              audio.load();
+            }
           }
         }
         audio.play().catch((err) => {
@@ -558,10 +672,10 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = nextPlaying ? 'playing' : 'paused';
     }
-  }, [setPlayingStore, setIsBuffering, initAudioContextKeepAlive]);
+  }, [setPlayingStore, setIsBuffering, initAudioContextKeepAlive, volume, isMuted, cleanupActiveBlobUrl]);
 
   const setPlaying = useCallback(
-    (playing: boolean) => {
+    async (playing: boolean) => {
       if (playing) {
         hasUserGestureRef.current = true;
         initAudioContextKeepAlive();
@@ -571,11 +685,36 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
       if (audio) {
         if (playing) {
-          if (!audio.src && usePlayerStore.getState().currentTrack) {
-            const vid = extractVideoId(usePlayerStore.getState().currentTrack);
-            if (vid) {
-              audio.src = `/api/stream?id=${encodeURIComponent(vid)}`;
-              audio.load();
+          const currentTrack = usePlayerStore.getState().currentTrack;
+          const vid = currentTrack ? extractVideoId(currentTrack) : '';
+          if (vid) {
+            const isAlreadyPlayingSame =
+              audio.src &&
+              (audio.src.startsWith('blob:') ||
+                audio.src.endsWith(encodeURIComponent(vid)) ||
+                audio.src.includes(encodeURIComponent(vid)));
+
+            if (!isAlreadyPlayingSame) {
+              setIsBuffering(true);
+              const offlineItem = await db.getOfflineTrack(vid).catch(() => undefined);
+              if (offlineItem?.blob && offlineItem.blob instanceof Blob && offlineItem.blob.size > 0) {
+                cleanupActiveBlobUrl();
+                const blobUrl = URL.createObjectURL(offlineItem.blob);
+                activeBlobUrlRef.current = blobUrl;
+                audio.src = blobUrl;
+                audio.currentTime = 0;
+                audio.volume = Math.max(0, Math.min(1, volume / 100));
+                audio.muted = isMuted;
+                audio.load();
+                setIsBuffering(false);
+              } else {
+                const streamUrl = `/api/stream?id=${encodeURIComponent(vid)}`;
+                audio.src = streamUrl;
+                audio.currentTime = 0;
+                audio.volume = Math.max(0, Math.min(1, volume / 100));
+                audio.muted = isMuted;
+                audio.load();
+              }
             }
           }
           audio.play().catch((err) => {
@@ -593,7 +732,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
       }
     },
-    [setPlayingStore, setIsBuffering, initAudioContextKeepAlive]
+    [setPlayingStore, setIsBuffering, initAudioContextKeepAlive, volume, isMuted, cleanupActiveBlobUrl]
   );
 
   const seekTo = useCallback(
@@ -681,65 +820,147 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
 
     const ms = navigator.mediaSession;
-    try {
-      ms.setActionHandler('play', () => {
+
+    // Safe action registration helper to prevent unsupported actions from blocking standard ones
+    const safeSetActionHandler = (
+      action: MediaSessionAction,
+      handler: MediaSessionActionHandler | null
+    ) => {
+      try {
+        ms.setActionHandler(action, handler);
+      } catch (err) {
+        // Suppress errors for actions not supported by this browser/OS version
+        console.warn(`[MediaSession] Action "${action}" not supported on this platform:`, err);
+      }
+    };
+
+    // 1. Play Action: Resumes playback and restores audio focus safely
+    safeSetActionHandler('play', async () => {
+      try {
+        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
+          await audioContextRef.current.resume().catch(() => {});
+        }
         mediaActionsRef.current.play();
         if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'playing';
         }
-      });
-      ms.setActionHandler('pause', () => {
+      } catch (err) {
+        console.error('[MediaSession] Play handler error:', err);
+      }
+    });
+
+    // 2. Pause Action: Pauses audio smoothly on system interrupt without touching queue
+    safeSetActionHandler('pause', () => {
+      try {
         mediaActionsRef.current.pause();
         if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'paused';
         }
-      });
-      ms.setActionHandler('previoustrack', () => {
+      } catch (err) {
+        console.error('[MediaSession] Pause handler error:', err);
+      }
+    });
+
+    // 3. Previous Track Action: Navigates queue safely
+    safeSetActionHandler('previoustrack', () => {
+      try {
         mediaActionsRef.current.prev();
-      });
-      ms.setActionHandler('nexttrack', () => {
+      } catch (err) {
+        console.error('[MediaSession] Prev handler error:', err);
+      }
+    });
+
+    // 4. Next Track Action: Navigates queue safely
+    safeSetActionHandler('nexttrack', () => {
+      try {
         mediaActionsRef.current.next();
-      });
-      ms.setActionHandler('seekto', (details) => {
-        if (details.seekTime !== undefined && details.seekTime !== null && !isNaN(details.seekTime)) {
+      } catch (err) {
+        console.error('[MediaSession] Next handler error:', err);
+      }
+    });
+
+    // 5. Seek To Action: Scrubbing from lock screen / Bluetooth controller
+    safeSetActionHandler('seekto', (details) => {
+      try {
+        if (
+          details.seekTime !== undefined &&
+          details.seekTime !== null &&
+          !isNaN(details.seekTime) &&
+          isFinite(details.seekTime)
+        ) {
           mediaActionsRef.current.seekTo(details.seekTime);
         }
-      });
-      ms.setActionHandler('seekbackward', (details) => {
+      } catch (err) {
+        console.error('[MediaSession] SeekTo handler error:', err);
+      }
+    });
+
+    // 6. Seek Backward Action: Quick rewind 10s
+    safeSetActionHandler('seekbackward', (details) => {
+      try {
         const skip = details.seekOffset || 10;
         const cur = usePlayerStore.getState().progress;
         mediaActionsRef.current.seekTo(Math.max(0, cur - skip));
-      });
-      ms.setActionHandler('seekforward', (details) => {
+      } catch (err) {
+        console.error('[MediaSession] SeekBackward handler error:', err);
+      }
+    });
+
+    // 7. Seek Forward Action: Quick fast-forward 10s
+    safeSetActionHandler('seekforward', (details) => {
+      try {
         const skip = details.seekOffset || 10;
         const cur = usePlayerStore.getState().progress;
         const dur = usePlayerStore.getState().duration;
         mediaActionsRef.current.seekTo(Math.min(dur, cur + skip));
-      });
-      ms.setActionHandler('stop', () => {
+      } catch (err) {
+        console.error('[MediaSession] SeekForward handler error:', err);
+      }
+    });
+
+    // 8. Stop Action: Handles mobile OS audio focus abandonment or notification dismiss
+    // CRITICAL: NEVER wipe or clear queue state on stop/pause interrupt!
+    safeSetActionHandler('stop', () => {
+      try {
         mediaActionsRef.current.pause();
         if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'paused';
         }
+      } catch (err) {
+        console.error('[MediaSession] Stop handler error:', err);
+      }
+    });
+
+    return () => {
+      const actions: MediaSessionAction[] = [
+        'play',
+        'pause',
+        'previoustrack',
+        'nexttrack',
+        'seekto',
+        'seekbackward',
+        'seekforward',
+        'stop',
+      ];
+      actions.forEach((action) => {
+        safeSetActionHandler(action, null);
       });
-    } catch {}
+    };
   }, []);
 
   // Sync MediaMetadata with Current Track
   useEffect(() => {
     if (currentTrack && typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-      const thumbnail = getHighResImage(
-        currentTrack.thumbnails?.[currentTrack.thumbnails.length - 1]?.url,
-        800
-      );
+      const rawThumbnail = currentTrack.thumbnails?.[currentTrack.thumbnails.length - 1]?.url;
+      const thumbnail = rawThumbnail ? getHighResImage(rawThumbnail, 800) : '/icon.png';
       const artist = Array.isArray(currentTrack.artist)
-        ? currentTrack.artist.map((a) => a.name).join(', ')
-        : currentTrack.artist?.name || 'Unknown Artist';
+        ? currentTrack.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(', ')
+        : (typeof currentTrack.artist === 'string' ? currentTrack.artist : currentTrack.artist?.name) || 'Unknown Artist';
 
       try {
         navigator.mediaSession.metadata = new MediaMetadata({
-          title: currentTrack.name,
-          artist,
+          title: currentTrack.name || 'PMUSIC Track',
+          artist: artist || 'PMUSIC Artist',
           album: 'PMUSIC',
           artwork: [
             { src: thumbnail, sizes: '96x96', type: 'image/jpeg' },
@@ -750,7 +971,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             { src: thumbnail, sizes: '512x512', type: 'image/jpeg' },
           ],
         });
-      } catch {}
+      } catch (err) {
+        console.warn('[MediaSession] Metadata update error:', err);
+      }
     }
   }, [currentTrack]);
 

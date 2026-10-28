@@ -18,6 +18,8 @@ export interface HistoryItem {
   playedAt: number;
 }
 
+export const MAX_HISTORY_ITEMS = 50;
+
 export function extractVideoId(raw: any): string {
   if (!raw) return '';
   let id = '';
@@ -209,7 +211,7 @@ export const usePlayerStore = create<PlayerState>()(
         const newHistoryItem: HistoryItem = { track, playedAt: Date.now() };
 
         const filteredHistory = state.history.filter((h) => h.track.videoId !== track.videoId);
-        const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+        const newHistory = [newHistoryItem, ...filteredHistory].slice(0, MAX_HISTORY_ITEMS);
 
         const newPlayCounts = { ...state.playCounts };
         newPlayCounts[track.videoId] = (newPlayCounts[track.videoId] || 0) + 1;
@@ -275,7 +277,7 @@ export const usePlayerStore = create<PlayerState>()(
           const state = get();
           const newHistoryItem = { track: nextTrack, playedAt: Date.now() };
           const filteredHistory = state.history.filter((h) => h.track.videoId !== nextTrack.videoId);
-          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, MAX_HISTORY_ITEMS);
 
           const newPlayCounts = { ...state.playCounts };
           newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
@@ -297,7 +299,7 @@ export const usePlayerStore = create<PlayerState>()(
           const state = get();
           const newHistoryItem = { track: nextTrack, playedAt: Date.now() };
           const filteredHistory = state.history.filter((h) => h.track.videoId !== nextTrack.videoId);
-          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, MAX_HISTORY_ITEMS);
 
           const newPlayCounts = { ...state.playCounts };
           newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
@@ -339,7 +341,7 @@ export const usePlayerStore = create<PlayerState>()(
                     const state = get();
                     const newHistoryItem = { track: nextTrack, playedAt: Date.now() };
                     const filteredHistory = state.history.filter((h) => h.track.videoId !== nextTrack.videoId);
-                    const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+                    const newHistory = [newHistoryItem, ...filteredHistory].slice(0, MAX_HISTORY_ITEMS);
 
                     const newPlayCounts = { ...state.playCounts };
                     newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
@@ -404,7 +406,7 @@ export const usePlayerStore = create<PlayerState>()(
           const state = get();
           const newHistoryItem = { track: prevTrack, playedAt: Date.now() };
           const filteredHistory = state.history.filter((h) => h.track.videoId !== prevTrack.videoId);
-          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, MAX_HISTORY_ITEMS);
 
           const newPlayCounts = { ...state.playCounts };
           newPlayCounts[prevTrack.videoId] = (newPlayCounts[prevTrack.videoId] || 0) + 1;
@@ -426,7 +428,7 @@ export const usePlayerStore = create<PlayerState>()(
           const state = get();
           const newHistoryItem = { track: prevTrack, playedAt: Date.now() };
           const filteredHistory = state.history.filter((h) => h.track.videoId !== prevTrack.videoId);
-          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+          const newHistory = [newHistoryItem, ...filteredHistory].slice(0, MAX_HISTORY_ITEMS);
 
           const newPlayCounts = { ...state.playCounts };
           newPlayCounts[prevTrack.videoId] = (newPlayCounts[prevTrack.videoId] || 0) + 1;
@@ -453,7 +455,7 @@ export const usePlayerStore = create<PlayerState>()(
 
         const newHistoryItem = { track: targetTrack, playedAt: Date.now() };
         const filteredHistory = state.history.filter((h) => h.track.videoId !== targetTrack.videoId);
-        const newHistory = [newHistoryItem, ...filteredHistory].slice(0, 500);
+        const newHistory = [newHistoryItem, ...filteredHistory].slice(0, MAX_HISTORY_ITEMS);
 
         const newPlayCounts = { ...state.playCounts };
         newPlayCounts[targetTrack.videoId] = (newPlayCounts[targetTrack.videoId] || 0) + 1;
@@ -591,11 +593,36 @@ export const usePlayerStore = create<PlayerState>()(
     {
       name: 'player-storage',
       onRehydrateStorage: () => (state) => {
-        if (state && state.repeatMode === 'one') {
-          state.repeatMode = 'off';
+        if (state) {
+          // Always ensure the player hydrates in paused & ready state
+          state.isPlaying = false;
+          state.isBuffering = false;
+          if (state.repeatMode === 'one') {
+            state.repeatMode = 'off';
+          }
+          // Trim history to MAX_HISTORY_ITEMS to prevent browser storage quota bloat and memory leaks
+          if (Array.isArray(state.history) && state.history.length > MAX_HISTORY_ITEMS) {
+            state.history = state.history.slice(0, MAX_HISTORY_ITEMS);
+          }
+          // If currentTrack is empty but history exists, recover last track in paused state
+          if (!state.currentTrack && Array.isArray(state.history) && state.history.length > 0) {
+            const lastTrack = state.history[0]?.track;
+            if (lastTrack && lastTrack.videoId) {
+              state.currentTrack = lastTrack;
+              if (!state.queue || state.queue.length === 0) {
+                state.queue = [lastTrack];
+                state.originalQueue = [lastTrack];
+                state.queueIndex = 0;
+              }
+            }
+          }
         }
       },
       partialize: (state) => ({
+        currentTrack: state.currentTrack,
+        queue: state.queue,
+        queueIndex: state.queueIndex,
+        originalQueue: state.originalQueue,
         history: state.history,
         playCounts: state.playCounts,
         volume: state.volume,

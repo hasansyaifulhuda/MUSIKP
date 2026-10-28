@@ -1,3 +1,5 @@
+import { db } from './db';
+
 /**
  * Global Persistent Audio Element Singleton & Immediate Playback Controller
  * Attached to document.body, survives all page transitions & component lifecycle
@@ -41,6 +43,12 @@ export function playTrackImmediately(targetVid: string, autoPlay: boolean = true
   try {
     const audio = getPersistentAudioElement();
     if (!audio) return;
+
+    // If device is offline or track is stored in IndexedDB, do NOT set network stream URL!
+    // MusicContext's loadAndPlayTrack will resolve the local Blob from IndexedDB directly.
+    if ((typeof navigator !== 'undefined' && !navigator.onLine) || db.isOfflineTrackSync(targetVid)) {
+      return;
+    }
 
     const streamUrl = `/api/stream?id=${encodeURIComponent(targetVid)}`;
     const isSameSrc = audio.src === streamUrl || audio.src.endsWith(encodeURIComponent(targetVid));

@@ -244,6 +244,35 @@ class DatabaseManager {
 
 const dbManager = DatabaseManager.getInstance();
 
+const offlineTrackIdsCache: Set<string> = new Set();
+
+/**
+ * Requests persistent storage from the browser (navigator.storage.persist)
+ * Ensures IndexedDB and CacheStorage are not cleared by the browser during storage pressure
+ */
+export async function requestPersistentStorage(): Promise<boolean> {
+  if (typeof window === 'undefined' || !navigator.storage || !navigator.storage.persist) {
+    return false;
+  }
+  try {
+    if (navigator.storage.persisted) {
+      const alreadyPersisted = await navigator.storage.persisted();
+      if (alreadyPersisted) {
+        console.log('[Storage] Storage will not be cleared except by explicit user action');
+        return true;
+      }
+    }
+    const granted = await navigator.storage.persist();
+    if (granted) {
+      console.log('Storage will not be cleared except by explicit user action');
+    }
+    return Boolean(granted);
+  } catch (err) {
+    console.warn('[Storage] Error requesting persistent storage:', err);
+    return false;
+  }
+}
+
 export const db = {
   // -------------------------------------------------------------
   // Playlists
@@ -472,10 +501,28 @@ export const db = {
   // -------------------------------------------------------------
   // Offline Tracks & Audio Blob Downloads
   // -------------------------------------------------------------
+  async initOfflineCache(): Promise<void> {
+    if (typeof window === 'undefined') return;
+    try {
+      const keys = await dbManager.executeWithRetry((idb) => idb.getAllKeys('offline_tracks'));
+      offlineTrackIdsCache.clear();
+      keys.forEach((k) => offlineTrackIdsCache.add(String(k)));
+    } catch {}
+  },
+
+  isOfflineTrackSync(videoId: string): boolean {
+    if (!videoId) return false;
+    return offlineTrackIdsCache.has(videoId);
+  },
+
   async getOfflineTracks(): Promise<OfflineTrack[]> {
     if (typeof window === 'undefined') return [];
     try {
-      return await dbManager.executeWithRetry((idb) => idb.getAll('offline_tracks'));
+      const items = await dbManager.executeWithRetry((idb) => idb.getAll('offline_tracks'));
+      const validItems = items.filter((it) => it && it.blob && it.blob instanceof Blob && it.blob.size > 0);
+      offlineTrackIdsCache.clear();
+      validItems.forEach((it) => offlineTrackIdsCache.add(it.videoId));
+      return validItems;
     } catch (err) {
       console.warn('[IDB] Failed to get offline tracks:', err);
       return [];
@@ -485,34 +532,66 @@ export const db = {
   async getOfflineTrack(videoId: string): Promise<OfflineTrack | undefined> {
     if (typeof window === 'undefined' || !videoId) return undefined;
     try {
-      return await dbManager.executeWithRetry((idb) => idb.get('offline_tracks', videoId));
+      const item = await dbManager.executeWithRetry((idb) => idb.get('offline_tracks', videoId));
+      if (item && item.blob && item.blob instanceof Blob && item.blob.size > 0) {
+        offlineTrackIdsCache.add(videoId);
+        return item;
+      }
+      return undefined;
     } catch (err) {
       console.warn(`[IDB] Failed to get offline track ${videoId}:`, err);
       return undefined;
     }
   },
 
-  async saveOfflineTrack(track: Track, blob?: Blob): Promise<OfflineTrack | undefined> {
-    if (typeof window === 'undefined' || !track?.videoId) return undefined;
+  async saveOfflineTrack(track: Track, blob?: Blob): Promise<OfflineTrack> {
+    if (typeof window === 'undefined' || !track?.videoId) {
+      throw new Error('Track tidak valid atau IndexedDB tidak tersedia');
+    }
+
+    // Proactively request persistent storage before persisting heavy audio binary
+    await requestPersistentStorage();
 
     let audioBlob = blob;
 
     // If no blob is supplied, fetch the direct audio stream from the proxy API
     if (!audioBlob) {
+      const controller = new AbortController();
+      // 35-second overall timeout covering both handshake and blob download on mobile
+      const timeout = setTimeout(() => controller.abort(), 35000);
       try {
-        const controller = new AbortController();
-        const timeout = setTimeout(() => controller.abort(), 20000); // 20-second timeout
         const res = await fetch(`/api/stream?id=${encodeURIComponent(track.videoId)}`, {
           signal: controller.signal,
         });
-        clearTimeout(timeout);
 
-        if (res.ok) {
-          audioBlob = await res.blob();
+        if (!res.ok) {
+          throw new Error(`Gagal mengunduh audio (HTTP ${res.status})`);
         }
-      } catch (e) {
-        console.warn('[IDB] Could not fetch audio blob, saving track metadata only:', e);
+
+        const contentType = res.headers.get('content-type') || 'audio/mpeg';
+        const rawBlob = await res.blob();
+        if (!rawBlob || rawBlob.size === 0) {
+          throw new Error('Data audio kosong atau unduhan terputus');
+        }
+
+        // Guarantee that the raw audio is stored as an actual Blob with valid audio MIME type
+        audioBlob =
+          rawBlob.type && rawBlob.type.startsWith('audio/')
+            ? rawBlob
+            : new Blob([rawBlob], { type: contentType.startsWith('audio/') ? contentType : 'audio/mpeg' });
+      } catch (err: any) {
+        if (err?.name === 'AbortError') {
+          throw new Error('Unduhan melebihi batas waktu (timeout). Koneksi terlalu lambat.');
+        }
+        throw err;
+      } finally {
+        clearTimeout(timeout);
       }
+    }
+
+    // Verify audioBlob is an authentic, non-empty binary Blob (NOT a temporary object URL string)
+    if (!(audioBlob instanceof Blob) || audioBlob.size === 0) {
+      throw new Error('Data audio tidak valid: file audio harus berformat binary Blob utuh.');
     }
 
     const item: OfflineTrack = {
@@ -524,10 +603,11 @@ export const db = {
 
     try {
       await dbManager.executeWithRetry((idb) => idb.put('offline_tracks', item));
+      offlineTrackIdsCache.add(track.videoId);
       return item;
     } catch (err) {
       console.warn(`[IDB] Failed to save offline track ${track.videoId}:`, err);
-      return undefined;
+      throw err;
     }
   },
 
@@ -535,6 +615,7 @@ export const db = {
     if (typeof window === 'undefined' || !videoId) return false;
     try {
       await dbManager.executeWithRetry((idb) => idb.delete('offline_tracks', videoId));
+      offlineTrackIdsCache.delete(videoId);
       return true;
     } catch (err) {
       console.warn(`[IDB] Failed to remove offline track ${videoId}:`, err);
@@ -544,9 +625,14 @@ export const db = {
 
   async isOfflineTrack(videoId: string): Promise<boolean> {
     if (typeof window === 'undefined' || !videoId) return false;
+    if (offlineTrackIdsCache.has(videoId)) return true;
     try {
       const item = await dbManager.executeWithRetry((idb) => idb.get('offline_tracks', videoId));
-      return Boolean(item);
+      const hasValidBlob = Boolean(item && item.blob && item.blob instanceof Blob && item.blob.size > 0);
+      if (hasValidBlob) {
+        offlineTrackIdsCache.add(videoId);
+      }
+      return hasValidBlob;
     } catch {
       return false;
     }
@@ -556,6 +642,7 @@ export const db = {
     if (typeof window === 'undefined') return false;
     try {
       await dbManager.executeWithRetry((idb) => idb.clear('offline_tracks'));
+      offlineTrackIdsCache.clear();
       return true;
     } catch (err) {
       console.warn('[IDB] Failed to clear offline tracks:', err);
