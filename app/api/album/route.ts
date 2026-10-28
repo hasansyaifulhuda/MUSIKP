@@ -1,11 +1,8 @@
-import YTMusic from 'ytmusic-api';
 import { metadataCache } from '@/lib/cache';
 import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
+import { ytmusicClient } from '@/lib/ytmusicClient';
 
 export const dynamic = 'force-dynamic';
-
-const ytmusic = new YTMusic();
-let initialized = false;
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -19,12 +16,12 @@ export async function GET(request: Request) {
 
   try {
     const album = await metadataCache.getOrFetch(`album:${cleanId}`, async () => {
-      if (!initialized) {
-        await ytmusic.initialize();
-        initialized = true;
-      }
-      return await ytmusic.getAlbum(cleanId);
+      return await ytmusicClient.getAlbum(cleanId);
     });
+
+    if (!album) {
+      return createErrorResponse('ID album tidak ditemukan atau server YouTube sedang sibuk.', 404);
+    }
 
     return createSuccessResponse(
       album,

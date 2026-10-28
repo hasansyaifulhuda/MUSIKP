@@ -11,19 +11,23 @@
     -webkit-overflow-scrolling: touch;
   }
 
-  /* Sleek modern Spotify scrollbars for desktop */
-  .spotify-scrollbar::-webkit-scrollbar {
+  /* Sleek modern PMUSIC scrollbars for desktop */
+  .spotify-scrollbar::-webkit-scrollbar,
+  .pmusic-scrollbar::-webkit-scrollbar {
     width: 8px;
     height: 8px;
   }
-  .spotify-scrollbar::-webkit-scrollbar-track {
+  .spotify-scrollbar::-webkit-scrollbar-track,
+  .pmusic-scrollbar::-webkit-scrollbar-track {
     background: transparent;
   }
-  .spotify-scrollbar::-webkit-scrollbar-thumb {
+  .spotify-scrollbar::-webkit-scrollbar-thumb,
+  .pmusic-scrollbar::-webkit-scrollbar-thumb {
     background-color: rgba(255, 255, 255, 0.2);
     border-radius: 9999px;
   }
-  .spotify-scrollbar::-webkit-scrollbar-thumb:hover {
+  .spotify-scrollbar::-webkit-scrollbar-thumb:hover,
+  .pmusic-scrollbar::-webkit-scrollbar-thumb:hover {
     background-color: rgba(255, 255, 255, 0.4);
   }
   
@@ -56,7 +60,7 @@
     contain-intrinsic-size: 0 58px;
   }
 
-  /* Lyrics vertical fade mask (smooth Spotify-grade gradient fade at top and bottom) */
+  /* Lyrics vertical fade mask (smooth PMUSIC-grade gradient fade at top and bottom) */
   .lyrics-mask {
     mask-image: linear-gradient(
       to bottom,

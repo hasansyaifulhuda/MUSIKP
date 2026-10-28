@@ -17,9 +17,15 @@ const PWARegister = dynamic(
   { ssr: false }
 );
 
+const ConsoleFilter = dynamic(
+  () => import('@/components/ConsoleFilter').then((mod) => mod.ConsoleFilter),
+  { ssr: false }
+);
+
 export function ClientModals() {
   return (
     <>
+      <ConsoleFilter />
       <AddToPlaylistModal />
       <ToastContainer />
       <PWARegister />

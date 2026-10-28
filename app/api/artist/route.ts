@@ -1,11 +1,8 @@
-import YTMusic from 'ytmusic-api';
 import { metadataCache } from '@/lib/cache';
 import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
+import { ytmusicClient } from '@/lib/ytmusicClient';
 
 export const dynamic = 'force-dynamic';
-
-const ytmusic = new YTMusic();
-let initialized = false;
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -19,11 +16,8 @@ export async function GET(request: Request) {
 
   try {
     const artist = await metadataCache.getOrFetch(`artist:${cleanId}`, async () => {
-      if (!initialized) {
-        await ytmusic.initialize();
-        initialized = true;
-      }
-      const data = await ytmusic.getArtist(cleanId);
+      const data = await ytmusicClient.getArtist(cleanId);
+      if (!data) return null;
 
       // Fix ytmusic-api bug where carousels are shifted for artists with extra carousels (like "Live performances")
       if (data.featuredOn && data.featuredOn.length > 0 && data.featuredOn[0].playlistId === data.artistId) {
@@ -60,6 +54,10 @@ export async function GET(request: Request) {
 
       return data;
     });
+
+    if (!artist) {
+      return createErrorResponse('Artist tidak ditemukan atau server YouTube sedang sibuk.', 404);
+    }
 
     return createSuccessResponse(
       artist,

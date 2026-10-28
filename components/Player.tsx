@@ -112,7 +112,7 @@ export function Player() {
   const currentVideoId = currentTrack?.videoId;
   const currentTrackName = currentTrack?.name;
   const currentArtistName = Array.isArray(currentTrack?.artist)
-    ? currentTrack?.artist.map((a) => a.name).join(' ')
+    ? currentTrack.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(' ')
     : currentTrack?.artist?.name || '';
   const currentTrackDuration = currentTrack?.duration;
 
@@ -239,7 +239,7 @@ export function Player() {
 
   const thumbnail = getHighResImage(currentTrack.thumbnails?.[currentTrack.thumbnails.length - 1]?.url, 800);
   const artistName = Array.isArray(currentTrack.artist)
-    ? currentTrack.artist.map((a) => a.name).join(', ')
+    ? currentTrack.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(', ')
     : currentTrack.artist?.name || 'Unknown Artist';
 
   return (
@@ -306,7 +306,7 @@ export function Player() {
       </div>
 
       {/* ========================================================================= */}
-      {/* 2. DESKTOP BOTTOM PLAYER BAR (Spotify Classic Symmetrical 3-Column Bar)   */}
+      {/* 2. DESKTOP BOTTOM PLAYER BAR (PMUSIC Symmetrical 3-Column Bar)   */}
       {/* ========================================================================= */}
       <footer
         className="hidden md:flex fixed bottom-0 left-0 right-0 h-24 z-50 bg-[#181818] border-t border-[#282828] px-4 items-center justify-between select-none"
@@ -686,7 +686,7 @@ export function Player() {
                         if (idx <= queueIndex) return null;
                         const thumb = getHighResImage(t.thumbnails?.[t.thumbnails.length - 1]?.url, 100);
                         const art = Array.isArray(t.artist)
-                          ? t.artist.map((a) => a.name).join(', ')
+                          ? t.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(', ')
                           : t.artist?.name || 'Unknown Artist';
                         return (
                           <div

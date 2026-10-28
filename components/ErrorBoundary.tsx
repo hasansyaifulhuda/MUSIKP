@@ -18,7 +18,7 @@ interface State {
 /**
  * Production-grade Error Boundary for Audio & Views:
  * Gracefully catches runtime errors, network dropouts, or unhandled exceptions,
- * presenting a clean, minimalist Spotify dark UI with an instant retry action.
+ * presenting a clean, minimalist PMUSIC dark UI with an instant retry action.
  */
 export class ErrorBoundary extends Component<Props, State> {
   public state: State = {

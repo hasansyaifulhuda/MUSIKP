@@ -5,4 +5,5 @@ coverage/
 *.log
 .env*
 !.env.example
-cookies.txt
+cookies*.txt
+storage/

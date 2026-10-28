@@ -24,7 +24,7 @@ export default function InstallApkPage() {
     const onAppInstalled = () => {
       setIsInstalled(true);
       setCanInstall(false);
-      toast.success('Spotify berhasil terpasang di perangkat Anda!');
+      toast.success('PMUSIC berhasil terpasang di perangkat Anda!');
     };
 
     window.addEventListener('pwa-prompt-available', onPromptAvailable);
@@ -43,7 +43,7 @@ export default function InstallApkPage() {
         await window.deferredPrompt.prompt();
         const choiceResult = await window.deferredPrompt.userChoice;
         if (choiceResult.outcome === 'accepted') {
-          toast.success('Menginstal Spotify...');
+          toast.success('Menginstal PMUSIC...');
           setIsInstalled(true);
         } else {
           toast.info('Instalasi dibatalkan');
@@ -91,7 +91,7 @@ export default function InstallApkPage() {
         </div>
 
         <h2 className="text-2xl md:text-3xl font-extrabold text-white mb-3 tracking-tight">
-          Pasang Aplikasi Spotify
+          Pasang Aplikasi PMUSIC
         </h2>
         <p className="text-sm md:text-base text-[#b3b3b3] mb-8 leading-relaxed max-w-sm">
           Nikmati pengalaman pemutaran audio lancar tanpa lag, kontrol notifikasi layar kunci, dan akses offline instan di ponsel Anda.
@@ -127,7 +127,7 @@ export default function InstallApkPage() {
 
       {/* Footer Info */}
       <div className="text-center text-xs text-[#b3b3b3]/50 pb-2">
-        Aplikasi Web Progresif (PWA) Spotify Clone • Versi 2.0
+        Aplikasi Web Progresif (PWA) PMUSIC • Versi 2.0
       </div>
     </div>
   );

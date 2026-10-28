@@ -3,7 +3,7 @@
 import { memo } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { Home, Search, Library, Heart, Clock, DownloadCloud, Smartphone, Settings, Music } from 'lucide-react';
+import { Home, Search, Library, Clock, DownloadCloud, Smartphone, Settings, Music } from 'lucide-react';
 import { cn } from '@/lib/utils';
 
 export const Sidebar = memo(function Sidebar() {
@@ -16,7 +16,6 @@ export const Sidebar = memo(function Sidebar() {
 
   const libraryNav = [
     { name: 'Koleksi', href: '/library', icon: Library },
-    { name: 'Lagu Disukai', href: '/library', icon: Heart },
     { name: 'Download', href: '/download', icon: DownloadCloud },
     { name: 'Riwayat Putar', href: '/history', icon: Clock },
     { name: 'Install APK', href: '/install-apk', icon: Smartphone },
@@ -32,7 +31,7 @@ export const Sidebar = memo(function Sidebar() {
             <Music className="w-5 h-5 fill-current stroke-[2.5]" />
           </div>
           <span className="font-extrabold text-xl tracking-tight text-white group-hover:text-[#1DB954] transition-colors">
-            Spotify
+            PMUSIC
           </span>
         </Link>
 
@@ -64,7 +63,7 @@ export const Sidebar = memo(function Sidebar() {
           <span className="text-xs font-bold text-[#b3b3b3] uppercase tracking-wider">Koleksi Anda</span>
         </div>
 
-        <nav className="flex-1 overflow-y-auto no-scrollbar flex flex-col gap-1 spotify-scrollbar">
+        <nav className="flex-1 overflow-y-auto no-scrollbar flex flex-col gap-1 pmusic-scrollbar">
           {libraryNav.map((item) => {
             const isActive = pathname === item.href;
             return (
@@ -85,9 +84,9 @@ export const Sidebar = memo(function Sidebar() {
           })}
         </nav>
 
-        {/* Legal / Spotify Status Badge */}
+        {/* Legal / PMUSIC Status Badge */}
         <div className="pt-3 border-t border-white/[0.06] px-2 text-[11px] text-[#b3b3b3]/60 flex items-center justify-between">
-          <span>Spotify Web Player</span>
+          <span>PMUSIC Web Player</span>
           <span className="flex items-center gap-1.5 text-[10px] text-[#1DB954]">
             <span className="w-2 h-2 rounded-full bg-[#1DB954] animate-pulse" />
             <span>Aktif</span>

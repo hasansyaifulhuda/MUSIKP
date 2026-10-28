@@ -1,9 +1,6 @@
 import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
-import YTMusic from 'ytmusic-api';
 import { MemoryCache } from '@/lib/cache';
-
-const ytmusic = new YTMusic();
-let initialized = false;
+import { ytmusicClient } from '@/lib/ytmusicClient';
 
 interface LyricLine {
   time: number;
@@ -96,7 +93,7 @@ export async function GET(request: Request) {
     try {
       const res = await fetch(url, {
         signal: controller.signal,
-        headers: { 'User-Agent': 'SpotifyClone/2.0' },
+        headers: { 'User-Agent': 'PMUSIC/2.0' },
       });
       clearTimeout(timeout);
       return res;
@@ -189,12 +186,10 @@ export async function GET(request: Request) {
     // 4. TIER 4: Fallback to YouTube Music Lyrics tab if video ID is available
     if (id && id.length === 11) {
       try {
-        if (!initialized) {
-          await ytmusic.initialize();
-          initialized = true;
-        }
-
-        const watchPlaylistData = await (ytmusic as any).constructRequest('next', { videoId: id });
+        const ready = await ytmusicClient.ensureInitialized();
+        if (ready) {
+          const ytmusic = ytmusicClient.getRawInstance();
+          const watchPlaylistData = await (ytmusic as any).constructRequest('next', { videoId: id });
         let lyricsId = null;
         const tabs = watchPlaylistData?.contents?.singleColumnMusicWatchNextResultsRenderer?.tabbedRenderer?.watchNextTabbedResultsRenderer?.tabs;
 
@@ -225,7 +220,8 @@ export async function GET(request: Request) {
             return { synced: false, lyrics: parsed };
           }
         }
-      } catch (e: any) {
+      }
+    } catch (e: any) {
         if (e.message !== 'Invalid videoId') {
           console.error('Error fetching YouTube Music lyrics:', e?.message || e);
         }

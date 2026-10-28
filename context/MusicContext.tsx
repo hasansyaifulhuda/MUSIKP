@@ -9,17 +9,43 @@ import React, {
   useEffect,
   useRef,
 } from 'react';
-import dynamic from 'next/dynamic';
 import { usePlayerStore, Track, extractVideoId } from '@/lib/store';
 import { useHotkeys } from '@/hooks/useHotkeys';
 import { db } from '@/lib/db';
 import { toast } from '@/lib/toast';
 import { getHighResImage } from '@/lib/utils';
 
-// Client-only dynamic import of react-youtube to ensure 100% SSR safety
-const YouTube = dynamic(() => import('react-youtube'), {
-  ssr: false,
-});
+// =========================================================================
+// Global Persistent Audio Element Singleton
+// Attached to document.body, survives all page transitions & component lifecycle
+// =========================================================================
+let persistentAudioElement: HTMLAudioElement | null = null;
+
+function getPersistentAudioElement(): HTMLAudioElement | null {
+  if (typeof window === 'undefined') return null;
+  if (!persistentAudioElement) {
+    let el = (document.getElementById('pmusic-persistent-audio') ||
+      document.getElementById('sann-persistent-audio')) as HTMLAudioElement | null;
+    if (!el) {
+      el = document.createElement('audio');
+      el.id = 'pmusic-persistent-audio';
+      el.preload = 'auto';
+      el.setAttribute('playsinline', 'true');
+      el.setAttribute('webkit-playsinline', 'true');
+      el.style.position = 'fixed';
+      el.style.bottom = '0';
+      el.style.left = '0';
+      el.style.width = '0';
+      el.style.height = '0';
+      el.style.opacity = '0';
+      el.style.pointerEvents = 'none';
+      el.style.zIndex = '-9999';
+      document.body.appendChild(el);
+    }
+    persistentAudioElement = el;
+  }
+  return persistentAudioElement;
+}
 
 export interface MusicContextType {
   currentTrack: Track | null;
@@ -57,7 +83,7 @@ export interface MusicContextType {
 
 const MusicContext = createContext<MusicContextType | null>(null);
 
-const LIKED_STORAGE_KEY = 'spotify_liked_tracks';
+const LIKED_STORAGE_KEY = 'pmusic_liked_tracks';
 
 export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Store subscriptions
@@ -86,38 +112,49 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const addToQueue = usePlayerStore((state) => state.addToQueue);
   const clearQueue = usePlayerStore((state) => state.clearQueue);
 
-  // =========================================================================
-  // 1. YouTube Player References & State Machine via react-youtube
-  // =========================================================================
-  const playerRef = useRef<any>(null);
-  const isPlayerReadyRef = useRef<boolean>(false);
-  const loadedTrackIdRef = useRef<string | null>(null);
+  // Local State & Audio Control Refs
+  const [isMuted, setIsMuted] = useState<boolean>(false);
   const isSeekingLockRef = useRef<boolean>(false);
-  const seekCooldownTimeoutRef = useRef<NodeJS.Timeout | null>(null);
-  const consecutiveFailuresRef = useRef<number>(0);
-  const stallRecoveryCountRef = useRef<number>(0);
-  const bufferingWatchdogRef = useRef<NodeJS.Timeout | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
-  const fallbackAudioRef = useRef<HTMLAudioElement | null>(null);
-  const isFallbackActiveRef = useRef<boolean>(false);
-  const [isFallbackActive, setIsFallbackActive] = useState<boolean>(false);
+  const seekLockTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const loadedTrackIdRef = useRef<string | null>(null);
   const lastProgressRef = useRef<number>(-1);
   const lastMediaSessionUpdateRef = useRef<number>(0);
+  const activeBlobUrlRef = useRef<string | null>(null);
+  const audioContextRef = useRef<AudioContext | null>(null);
+  const playNextRef = useRef<() => void>(() => {});
+  const wakeLockRef = useRef<any>(null);
 
-  const setFallbackActive = useCallback((active: boolean) => {
-    isFallbackActiveRef.current = active;
-    setIsFallbackActive(active);
+  // Revoke previous object URLs to prevent memory leaks
+  const cleanupActiveBlobUrl = useCallback(() => {
+    if (activeBlobUrlRef.current) {
+      try {
+        URL.revokeObjectURL(activeBlobUrlRef.current);
+      } catch {}
+      activeBlobUrlRef.current = null;
+    }
   }, []);
 
-  const [isMounted, setIsMounted] = useState<boolean>(false);
-  const [isMuted, setIsMuted] = useState<boolean>(false);
-  const [prevVolume, setPrevVolume] = useState<number>(100);
-
-  useEffect(() => {
-    setIsMounted(true);
+  // Update MediaSession Position State (Throttled for high performance & lockscreen scrubber)
+  const updateMediaSessionPosition = useCallback((curTime: number, totalDur?: number) => {
+    if (
+      typeof navigator !== 'undefined' &&
+      'mediaSession' in navigator &&
+      'setPositionState' in navigator.mediaSession
+    ) {
+      const dur = totalDur || usePlayerStore.getState().duration || 0;
+      if (dur > 0 && typeof curTime === 'number' && !isNaN(curTime) && curTime >= 0) {
+        try {
+          navigator.mediaSession.setPositionState({
+            duration: dur,
+            playbackRate: 1,
+            position: Math.min(dur, Math.max(0, curTime)),
+          });
+        } catch {}
+      }
+    }
   }, []);
 
-  // 1A. Hardware Audio Focus Keep-Alive (prevents mobile background audio ducking)
+  // Hardware Audio Focus Keep-Alive (prevents mobile background audio ducking / suspension)
   const initAudioContextKeepAlive = useCallback(() => {
     if (typeof window === 'undefined') return;
     try {
@@ -139,7 +176,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     } catch {}
   }, []);
 
-  // 1B. Declare W3C AudioSession 'playback' mode for mobile media focus
+  // Declare W3C AudioSession 'playback' mode for mobile media focus (iOS & modern Android)
   useEffect(() => {
     if (typeof navigator !== 'undefined' && 'audioSession' in navigator) {
       try {
@@ -148,13 +185,111 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
-  // Forward declarations for player event handlers
-  const handlePlayerEndedRef = useRef<() => void>(() => {});
-  const handlePlayerErrorRef = useRef<(code: number) => void>(() => {});
-  const handleStreamStalledRef = useRef<() => void>(() => {});
+  // =========================================================================
+  // Native HTML5 Audio Engine & Hardware Event Listeners
+  // Native events (timeupdate, ended, playing) bypass browser background timer throttling
+  // =========================================================================
+  useEffect(() => {
+    const audio = getPersistentAudioElement();
+    if (!audio) return;
+
+    // Apply initial volume & muted state
+    audio.volume = Math.max(0, Math.min(1, volume / 100));
+    audio.muted = isMuted;
+
+    const handleTimeUpdate = () => {
+      if (!isSeekingLockRef.current) {
+        const cur = audio.currentTime;
+        if (Math.abs(cur - lastProgressRef.current) >= 0.25 || lastProgressRef.current < 0) {
+          lastProgressRef.current = cur;
+          setProgress(cur);
+        }
+        const now = Date.now();
+        if (now - lastMediaSessionUpdateRef.current >= 1200) {
+          lastMediaSessionUpdateRef.current = now;
+          updateMediaSessionPosition(cur, audio.duration);
+        }
+      }
+    };
+
+    const handleDurationChange = () => {
+      if (audio.duration && !isNaN(audio.duration) && audio.duration > 0) {
+        setDuration(audio.duration);
+        updateMediaSessionPosition(audio.currentTime, audio.duration);
+      }
+    };
+
+    const handlePlay = () => {
+      setPlayingStore(true);
+      setIsBuffering(false);
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'playing';
+      }
+    };
+
+    const handlePause = () => {
+      // Only set playing to false if the user/code explicitly triggered a pause on audio
+      // DO NOT pause if tab is merely hidden or buffering
+      if (!audio.seeking && audio.paused) {
+        setPlayingStore(false);
+        if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+          navigator.mediaSession.playbackState = 'paused';
+        }
+      }
+    };
+
+    const handleWaiting = () => {
+      setIsBuffering(true);
+    };
+
+    const handlePlaying = () => {
+      setIsBuffering(false);
+      setPlayingStore(true);
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        navigator.mediaSession.playbackState = 'playing';
+      }
+    };
+
+    const handleEnded = () => {
+      setIsBuffering(false);
+      const curRepeat = usePlayerStore.getState().repeatMode;
+      if (curRepeat === 'one') {
+        audio.currentTime = 0;
+        audio.play().catch(() => {});
+      } else {
+        playNextRef.current();
+      }
+    };
+
+    const handleError = () => {
+      // Silent auto-advance on stream error to maintain clean developer console
+      setIsBuffering(false);
+      playNextRef.current();
+    };
+
+    audio.addEventListener('timeupdate', handleTimeUpdate);
+    audio.addEventListener('durationchange', handleDurationChange);
+    audio.addEventListener('play', handlePlay);
+    audio.addEventListener('pause', handlePause);
+    audio.addEventListener('waiting', handleWaiting);
+    audio.addEventListener('playing', handlePlaying);
+    audio.addEventListener('ended', handleEnded);
+    audio.addEventListener('error', handleError);
+
+    return () => {
+      audio.removeEventListener('timeupdate', handleTimeUpdate);
+      audio.removeEventListener('durationchange', handleDurationChange);
+      audio.removeEventListener('play', handlePlay);
+      audio.removeEventListener('pause', handlePause);
+      audio.removeEventListener('waiting', handleWaiting);
+      audio.removeEventListener('playing', handlePlaying);
+      audio.removeEventListener('ended', handleEnded);
+      audio.removeEventListener('error', handleError);
+    };
+  }, [setPlayingStore, setIsBuffering, setDuration, setProgress, updateMediaSessionPosition, volume, isMuted]);
 
   // =========================================================================
-  // 2. Playback Control Wrappers & Event Handlers
+  // Playback Navigation (playNext, playPrev)
   // =========================================================================
   const playNext = useCallback(async () => {
     initAudioContextKeepAlive();
@@ -166,6 +301,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     await playNextStore();
   }, [playNextStore, setPlayingStore, setIsBuffering, initAudioContextKeepAlive]);
 
+  useEffect(() => {
+    playNextRef.current = () => {
+      playNext();
+    };
+  }, [playNext]);
+
   const playPrev = useCallback(() => {
     initAudioContextKeepAlive();
     setPlayingStore(true);
@@ -176,8 +317,56 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     playPrevStore();
   }, [playPrevStore, setPlayingStore, setIsBuffering, initAudioContextKeepAlive]);
 
+  // =========================================================================
+  // Core Track Loader: Loads audio source directly into Persistent HTML5 Audio
+  // =========================================================================
+  const loadAndPlayTrack = useCallback(
+    async (targetVid: string, autoPlay: boolean = true) => {
+      const audio = getPersistentAudioElement();
+      if (!audio) return;
+
+      loadedTrackIdRef.current = targetVid;
+      cleanupActiveBlobUrl();
+      setIsBuffering(true);
+
+      // 1. Instant Offline Playback via local IndexedDB Blob
+      try {
+        const offlineItem = await db.getOfflineTrack(targetVid);
+        if (offlineItem?.blob) {
+          const blobUrl = URL.createObjectURL(offlineItem.blob);
+          activeBlobUrlRef.current = blobUrl;
+          audio.src = blobUrl;
+          audio.currentTime = 0;
+          audio.volume = Math.max(0, Math.min(1, volume / 100));
+          audio.muted = isMuted;
+          audio.load();
+          if (autoPlay) {
+            audio.play().catch(() => {});
+          }
+          return;
+        }
+      } catch {}
+
+      // 2. High-Performance Stealth Stream via /api/stream
+      const streamUrl = `/api/stream?id=${encodeURIComponent(targetVid)}`;
+      audio.src = streamUrl;
+      audio.currentTime = 0;
+      audio.volume = Math.max(0, Math.min(1, volume / 100));
+      audio.muted = isMuted;
+      audio.load();
+
+      if (autoPlay) {
+        audio.play().catch(() => {});
+      }
+    },
+    [volume, isMuted, cleanupActiveBlobUrl, setIsBuffering]
+  );
+
+  // =========================================================================
+  // Play Track & Queue Actions
+  // =========================================================================
   const playTrack = useCallback(
-    (track: any, queue?: any[], context?: 'playlist' | 'similar', forceIndex?: number) => {
+    async (track: any, queue?: any[], context?: 'playlist' | 'similar', forceIndex?: number) => {
       initAudioContextKeepAlive();
 
       const targetVideoId = extractVideoId(track);
@@ -192,144 +381,77 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         navigator.mediaSession.playbackState = 'playing';
       }
 
-      // Reset any active fallback audio element
-      if (fallbackAudioRef.current) {
-        try {
-          fallbackAudioRef.current.pause();
-          fallbackAudioRef.current.src = '';
-        } catch {}
-      }
-      setFallbackActive(false);
-
-      // If track is from iTunes fallback (e.g. itunes:12345), resolve real YouTube ID asynchronously
-      if (targetVideoId.startsWith('itunes:')) {
-        fetch(`/api/stream?id=${encodeURIComponent(targetVideoId)}&json=true`)
-          .then((res) => (res.ok ? res.json() : null))
-          .then((data) => {
-            if (data?.success && data.videoId && !data.videoId.startsWith('itunes:')) {
-              const updatedTrack = {
-                ...track,
-                videoId: data.videoId,
-                youtubeId: data.videoId,
-              };
-              const player = playerRef.current;
-              if (player && isPlayerReadyRef.current) {
-                loadedTrackIdRef.current = data.videoId;
-                try {
-                  player.loadVideoById(data.videoId);
-                  player.playVideo();
-                } catch {}
-              }
-              playTrackStore(updatedTrack, queue, context, forceIndex);
-            } else if (data?.streamUrl && fallbackAudioRef.current) {
-              setFallbackActive(true);
-              fallbackAudioRef.current.src = data.streamUrl;
-              fallbackAudioRef.current.play().catch(() => {});
-              playTrackStore(track, queue, context, forceIndex);
-            }
-          })
-          .catch((e) => {
-            console.warn('[MusicContext] iTunes to YouTube resolution error:', e);
-          });
-        return;
-      }
-
-      // Direct Client-Side YouTube Control: Load ID directly into react-youtube instance
-      const player = playerRef.current;
-      if (player && isPlayerReadyRef.current) {
-        try {
-          loadedTrackIdRef.current = targetVideoId;
-          isSeekingLockRef.current = false;
-          stallRecoveryCountRef.current = 0;
-          player.loadVideoById(targetVideoId);
-          player.playVideo();
-        } catch (e) {
-          console.warn('Direct react-youtube play error:', e);
-        }
-      }
-
       playTrackStore(track, queue, context, forceIndex);
+      await loadAndPlayTrack(targetVideoId, true);
     },
-    [playTrackStore, setPlayingStore, setIsBuffering, initAudioContextKeepAlive]
+    [playTrackStore, setPlayingStore, setIsBuffering, initAudioContextKeepAlive, loadAndPlayTrack]
   );
 
   const playQueueIndex = useCallback(
-    (index: number) => {
+    async (index: number) => {
       initAudioContextKeepAlive();
       setPlayingStore(true);
       setIsBuffering(true);
 
-      if (fallbackAudioRef.current) {
-        try {
-          fallbackAudioRef.current.pause();
-          fallbackAudioRef.current.src = '';
-        } catch {}
-      }
-      setFallbackActive(false);
-
       const targetTrack = usePlayerStore.getState().queue[index];
       if (targetTrack) {
         const targetVid = extractVideoId(targetTrack);
-        if (targetVid?.startsWith('itunes:')) {
-          fetch(`/api/stream?id=${encodeURIComponent(targetVid)}&json=true`)
-            .then((res) => (res.ok ? res.json() : null))
-            .then((data) => {
-              if (data?.success && data.videoId && !data.videoId.startsWith('itunes:')) {
-                const player = playerRef.current;
-                if (player && isPlayerReadyRef.current) {
-                  loadedTrackIdRef.current = data.videoId;
-                  try {
-                    player.loadVideoById(data.videoId);
-                    player.playVideo();
-                  } catch {}
-                }
-              } else if (data?.streamUrl && fallbackAudioRef.current) {
-                setFallbackActive(true);
-                fallbackAudioRef.current.src = data.streamUrl;
-                fallbackAudioRef.current.play().catch(() => {});
-              }
-            })
-            .catch(() => {});
-        } else if (targetVid && playerRef.current && isPlayerReadyRef.current) {
-          try {
-            loadedTrackIdRef.current = targetVid;
-            isSeekingLockRef.current = false;
-            stallRecoveryCountRef.current = 0;
-            playerRef.current.loadVideoById(targetVid);
-            playerRef.current.playVideo();
-          } catch {}
+        if (targetVid) {
+          playQueueIndexStore(index);
+          await loadAndPlayTrack(targetVid, true);
+          return;
         }
       }
 
       playQueueIndexStore(index);
     },
-    [playQueueIndexStore, setPlayingStore, setIsBuffering, initAudioContextKeepAlive]
+    [playQueueIndexStore, setPlayingStore, setIsBuffering, initAudioContextKeepAlive, loadAndPlayTrack]
   );
 
+  // Synchronize track changes (e.g., from playNext, playPrev, or external store triggers)
+  const currentVideoId = extractVideoId(currentTrack);
+  useEffect(() => {
+    if (!currentVideoId) {
+      loadedTrackIdRef.current = null;
+      const audio = getPersistentAudioElement();
+      if (audio) {
+        try {
+          audio.pause();
+          audio.src = '';
+        } catch {}
+      }
+      return;
+    }
+
+    if (loadedTrackIdRef.current === currentVideoId) {
+      return;
+    }
+
+    loadAndPlayTrack(currentVideoId, usePlayerStore.getState().isPlaying);
+  }, [currentVideoId, loadAndPlayTrack]);
+
+  // =========================================================================
+  // Playback Control Handlers (Play, Pause, Seek, Volume, Mute)
+  // =========================================================================
   const togglePlay = useCallback(() => {
     initAudioContextKeepAlive();
+    const audio = getPersistentAudioElement();
     const currentStore = usePlayerStore.getState();
     const nextPlaying = !currentStore.isPlaying;
     setPlayingStore(nextPlaying);
 
-    if (isFallbackActiveRef.current && fallbackAudioRef.current) {
+    if (audio) {
       if (nextPlaying) {
-        fallbackAudioRef.current.play().catch(() => {});
-      } else {
-        fallbackAudioRef.current.pause();
-      }
-    }
-
-    const player = playerRef.current;
-    if (player && isPlayerReadyRef.current) {
-      try {
-        if (nextPlaying) {
-          player.playVideo();
-        } else {
-          player.pauseVideo();
+        if (!audio.src && currentStore.currentTrack) {
+          const vid = extractVideoId(currentStore.currentTrack);
+          if (vid) {
+            audio.src = `/api/stream?id=${encodeURIComponent(vid)}`;
+            audio.load();
+          }
         }
-      } catch (err) {
-        console.warn('Error toggling play/pause on react-youtube player:', err);
+        audio.play().catch(() => {});
+      } else {
+        audio.pause();
       }
     }
 
@@ -342,25 +464,20 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     (playing: boolean) => {
       initAudioContextKeepAlive();
       setPlayingStore(playing);
+      const audio = getPersistentAudioElement();
 
-      if (isFallbackActiveRef.current && fallbackAudioRef.current) {
+      if (audio) {
         if (playing) {
-          fallbackAudioRef.current.play().catch(() => {});
-        } else {
-          fallbackAudioRef.current.pause();
-        }
-      }
-
-      const player = playerRef.current;
-      if (player && isPlayerReadyRef.current) {
-        try {
-          if (playing) {
-            player.playVideo();
-          } else {
-            player.pauseVideo();
+          if (!audio.src && usePlayerStore.getState().currentTrack) {
+            const vid = extractVideoId(usePlayerStore.getState().currentTrack);
+            if (vid) {
+              audio.src = `/api/stream?id=${encodeURIComponent(vid)}`;
+              audio.load();
+            }
           }
-        } catch (err) {
-          console.warn('Error setting playing state on react-youtube player:', err);
+          audio.play().catch(() => {});
+        } else {
+          audio.pause();
         }
       }
 
@@ -371,338 +488,68 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     [setPlayingStore, initAudioContextKeepAlive]
   );
 
-  // Flawless Seek Operation directly manipulating react-youtube player instance
   const seekTo = useCallback(
     (time: number) => {
-      const player = playerRef.current;
-      const currentDur = usePlayerStore.getState().duration;
-      const clamped = Math.max(0, Math.min(currentDur || 0, time));
+      const audio = getPersistentAudioElement();
+      const dur = usePlayerStore.getState().duration || 0;
+      const clamped = Math.max(0, Math.min(dur > 0 ? dur : 9999, time));
 
       isSeekingLockRef.current = true;
+      lastProgressRef.current = clamped;
       setProgress(clamped);
 
-      if (isFallbackActiveRef.current && fallbackAudioRef.current) {
-        fallbackAudioRef.current.currentTime = clamped;
-        if (usePlayerStore.getState().isPlaying) {
-          fallbackAudioRef.current.play().catch(() => {});
-        }
-      }
-
-      if (player && isPlayerReadyRef.current) {
+      if (audio) {
         try {
-          player.seekTo(clamped, true);
-          if (usePlayerStore.getState().isPlaying) {
-            player.playVideo();
-          }
-        } catch (err) {
-          console.warn('react-youtube seek error:', err);
-        }
-      }
-
-      if (seekCooldownTimeoutRef.current) clearTimeout(seekCooldownTimeoutRef.current);
-      seekCooldownTimeoutRef.current = setTimeout(() => {
-        isSeekingLockRef.current = false;
-      }, 1000);
-    },
-    [setProgress]
-  );
-
-  // Volume & Mute Handlers
-  const toggleMute = useCallback(() => {
-    setIsMuted((prev) => {
-      const next = !prev;
-      if (fallbackAudioRef.current) {
-        fallbackAudioRef.current.muted = next;
-      }
-      const player = playerRef.current;
-      if (player && isPlayerReadyRef.current) {
-        try {
-          if (next) {
-            player.mute();
-          } else {
-            player.unMute();
-            player.setVolume(prevVolume || 80);
+          audio.currentTime = clamped;
+          if (usePlayerStore.getState().isPlaying && audio.paused) {
+            audio.play().catch(() => {});
           }
         } catch {}
       }
-      return next;
-    });
-  }, [prevVolume]);
+
+      updateMediaSessionPosition(clamped, dur);
+
+      if (seekLockTimerRef.current) clearTimeout(seekLockTimerRef.current);
+      seekLockTimerRef.current = setTimeout(() => {
+        isSeekingLockRef.current = false;
+      }, 400);
+    },
+    [setProgress, updateMediaSessionPosition]
+  );
 
   const setVolume = useCallback(
-    (vol: number) => {
-      if (vol > 0 && isMuted) {
-        setIsMuted(false);
-      }
-      setPrevVolume(vol);
-      setVolumeStore(vol);
-
-      if (fallbackAudioRef.current) {
-        fallbackAudioRef.current.volume = Math.max(0, Math.min(1, vol / 100));
-      }
-
-      const player = playerRef.current;
-      if (player && isPlayerReadyRef.current) {
-        try {
-          player.unMute();
-          player.setVolume(Math.max(0, Math.min(100, vol)));
-        } catch {}
+    (val: number) => {
+      const clamped = Math.max(0, Math.min(100, val));
+      setVolumeStore(clamped);
+      const audio = getPersistentAudioElement();
+      if (audio) {
+        audio.volume = clamped / 100;
       }
     },
-    [isMuted, setVolumeStore]
+    [setVolumeStore]
   );
 
-  // Attach Ended, Error & Stream Stalled Watchdogs
-  useEffect(() => {
-    handlePlayerEndedRef.current = () => {
-      const { repeatMode } = usePlayerStore.getState();
-      const player = playerRef.current;
-
-      if (repeatMode === 'one' && player && isPlayerReadyRef.current) {
-        try {
-          player.seekTo(0, true);
-          player.playVideo();
-        } catch {
-          playNext();
-        }
-      } else {
-        playNext();
-      }
-    };
-
-    handleStreamStalledRef.current = () => {
-      const player = playerRef.current;
-      if (!player || !isPlayerReadyRef.current) return;
-
-      try {
-        const stateRes = player.getPlayerState?.();
-        const checkState = (state: number) => {
-          // 3 = BUFFERING, -1 = UNSTARTED
-          if (state === 3 || state === -1) {
-            if (stallRecoveryCountRef.current < 1) {
-              stallRecoveryCountRef.current++;
-              toast.info('Menyambungkan ulang audio stream...');
-              player.seekTo(0, true);
-              player.playVideo();
-              return;
-            }
-
-            stallRecoveryCountRef.current = 0;
-            toast.info('Koneksi audio YouTube macet, memutar lagu berikutnya...');
-            playNext();
-          }
-        };
-
-        if (stateRes && typeof stateRes.then === 'function') {
-          stateRes.then(checkState).catch(() => {});
-        } else if (typeof stateRes === 'number') {
-          checkState(stateRes);
-        }
-      } catch {}
-    };
-
-    handlePlayerErrorRef.current = (code: number) => {
-      console.warn('react-youtube player error code received:', code);
-
-      if (consecutiveFailuresRef.current >= 3) {
-        toast.error('Gagal memutar beberapa lagu. Pemutaran dihentikan agar tidak terjadi perulangan.');
-        setPlayingStore(false);
-        setIsBuffering(false);
-        consecutiveFailuresRef.current = 0;
-        return;
-      }
-
-      consecutiveFailuresRef.current++;
-
-      if (code === 101 || code === 150) {
-        // Embed playback disabled by YouTube / content owner
-        // Seamlessly switch to backend yt-dlp audio stream without dropping playback
-        const curVid = loadedTrackIdRef.current || extractVideoId(usePlayerStore.getState().currentTrack);
-        if (curVid && fallbackAudioRef.current) {
-          toast.info('Lagu dibatasi oleh YouTube, memutar via audio stream backend...');
-          setFallbackActive(true);
-          fallbackAudioRef.current.src = `/api/stream?id=${encodeURIComponent(curVid)}`;
-          fallbackAudioRef.current.load();
-          fallbackAudioRef.current
-            .play()
-            .then(() => {
-              consecutiveFailuresRef.current = 0;
-            })
-            .catch((err) => {
-              console.warn('[MusicContext] Fallback audio playback failed:', err);
-              playNext();
-            });
-          return;
-        }
-        toast.info('Lagu ini dibatasi oleh YouTube untuk pemutar sematan, memutar lagu berikutnya...');
-      } else if (code === 100) {
-        toast.info('Lagu tidak ditemukan atau telah dihapus, memutar lagu berikutnya...');
-      } else if (code === 2) {
-        toast.info('ID lagu tidak valid, memutar lagu berikutnya...');
-      } else {
-        toast.info('Tidak dapat memutar lagu, memutar lagu berikutnya...');
-      }
-
-      playNext();
-    };
-  }, [playNext, setPlayingStore, setIsBuffering]);
-
-  // =========================================================================
-  // 3. Track Synchronization (Load new track into react-youtube player)
-  // =========================================================================
-  const currentVideoId = extractVideoId(currentTrack);
-
-  useEffect(() => {
-    if (!currentVideoId) {
-      loadedTrackIdRef.current = null;
-      if (isPlayerReadyRef.current && playerRef.current?.stopVideo) {
-        try {
-          playerRef.current.stopVideo();
-        } catch {}
-      }
-      return;
+  const toggleMute = useCallback(() => {
+    const next = !isMuted;
+    setIsMuted(next);
+    const audio = getPersistentAudioElement();
+    if (audio) {
+      audio.muted = next;
     }
+  }, [isMuted]);
 
-    if (loadedTrackIdRef.current === currentVideoId) {
-      return;
-    }
-
-    if (fallbackAudioRef.current) {
-      try {
-        fallbackAudioRef.current.pause();
-        fallbackAudioRef.current.src = '';
-      } catch {}
-    }
-    setFallbackActive(false);
-
-    loadedTrackIdRef.current = currentVideoId;
-    isSeekingLockRef.current = false;
-    stallRecoveryCountRef.current = 0;
-    setIsBuffering(true);
-
-    const player = playerRef.current;
-    if (player && isPlayerReadyRef.current) {
-      try {
-        if (usePlayerStore.getState().isPlaying) {
-          player.loadVideoById(currentVideoId);
-        } else {
-          player.cueVideoById(currentVideoId);
-        }
-      } catch (err) {
-        console.warn('Error synchronizing track to react-youtube player:', err);
-      }
-    }
-  }, [currentVideoId, setIsBuffering]);
-
-  // =========================================================================
-  // 4. Play/Pause State Watchdog
-  // =========================================================================
+  // Synchronize volume & mute whenever state changes
   useEffect(() => {
-    const player = playerRef.current;
-    if (!player || !isPlayerReadyRef.current) return;
-
-    try {
-      if (isPlaying) {
-        player.playVideo();
-      } else {
-        player.pauseVideo();
-      }
-    } catch {}
-  }, [isPlaying]);
-
-  // =========================================================================
-  // 5. Volume & Mute State Watchdog
-  // =========================================================================
-  useEffect(() => {
-    const player = playerRef.current;
-    if (!player || !isPlayerReadyRef.current) return;
-
-    try {
-      if (isMuted) {
-        player.mute();
-      } else {
-        player.unMute();
-        player.setVolume(Math.max(0, Math.min(100, volume)));
-      }
-    } catch {}
+    const audio = getPersistentAudioElement();
+    if (audio) {
+      audio.volume = Math.max(0, Math.min(1, volume / 100));
+      audio.muted = isMuted;
+    }
   }, [volume, isMuted]);
 
   // =========================================================================
-  // 6. High-Precision Progress & Duration Polling (250ms)
-  // =========================================================================
-  // 6. Audio Progress Polling & Synchronization (Throttled for High Performance)
-  // =========================================================================
-  useEffect(() => {
-    if (!isPlaying) return;
-
-    const interval = setInterval(() => {
-      const player = playerRef.current;
-      if (!player || !isPlayerReadyRef.current) return;
-
-      try {
-        if (typeof player.getCurrentTime === 'function') {
-          const curRes = player.getCurrentTime();
-          const handleCurTime = (cur: number) => {
-            if (typeof cur === 'number' && !isNaN(cur) && !isSeekingLockRef.current) {
-              // Throttle: only update state if delta >= 0.25s or when starting/resuming
-              if (Math.abs(cur - lastProgressRef.current) >= 0.25 || lastProgressRef.current < 0) {
-                lastProgressRef.current = cur;
-                setProgress(cur);
-              }
-
-              // Throttle MediaSession position updates to once every 1.5 seconds to eliminate IPC lag
-              const now = Date.now();
-              if (now - lastMediaSessionUpdateRef.current >= 1500) {
-                lastMediaSessionUpdateRef.current = now;
-                const dur = usePlayerStore.getState().duration;
-                if (
-                  typeof navigator !== 'undefined' &&
-                  'mediaSession' in navigator &&
-                  'setPositionState' in navigator.mediaSession &&
-                  dur &&
-                  dur > 0
-                ) {
-                  try {
-                    navigator.mediaSession.setPositionState({
-                      duration: dur,
-                      playbackRate: 1,
-                      position: Math.min(dur, cur),
-                    });
-                  } catch {}
-                }
-              }
-            }
-          };
-
-          if (curRes && typeof curRes.then === 'function') {
-            curRes.then(handleCurTime).catch(() => {});
-          } else if (typeof curRes === 'number') {
-            handleCurTime(curRes);
-          }
-        }
-
-        if (typeof player.getDuration === 'function') {
-          const durRes = player.getDuration();
-          const handleDur = (dur: number) => {
-            if (typeof dur === 'number' && dur > 0 && Math.abs(dur - usePlayerStore.getState().duration) > 0.5) {
-              setDuration(dur);
-            }
-          };
-
-          if (durRes && typeof durRes.then === 'function') {
-            durRes.then(handleDur).catch(() => {});
-          } else if (typeof durRes === 'number') {
-            handleDur(durRes);
-          }
-        }
-      } catch {}
-    }, 250);
-
-    return () => clearInterval(interval);
-  }, [isPlaying, setProgress, setDuration]);
-
-  // =========================================================================
-  // 7. MediaSession API (Lockscreen, Notification Shade, Headset Controls)
+  // Media Session API (Mobile Background & Lockscreen Notification Controls)
+  // Fully configured for continuous background control across PC and Mobile
   // =========================================================================
   const mediaActionsRef = useRef({
     play: () => {},
@@ -714,25 +561,39 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   useEffect(() => {
     mediaActionsRef.current = {
-      play: () => togglePlay(),
+      play: () => setPlaying(true),
       pause: () => setPlaying(false),
       next: () => playNext(),
       prev: () => playPrev(),
       seekTo: (time: number) => seekTo(time),
     };
-  }, [togglePlay, setPlaying, playNext, playPrev, seekTo]);
+  }, [setPlaying, playNext, playPrev, seekTo]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
 
     const ms = navigator.mediaSession;
     try {
-      ms.setActionHandler('play', () => mediaActionsRef.current.play());
-      ms.setActionHandler('pause', () => mediaActionsRef.current.pause());
-      ms.setActionHandler('previoustrack', () => mediaActionsRef.current.prev());
-      ms.setActionHandler('nexttrack', () => mediaActionsRef.current.next());
+      ms.setActionHandler('play', () => {
+        mediaActionsRef.current.play();
+        if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+          navigator.mediaSession.playbackState = 'playing';
+        }
+      });
+      ms.setActionHandler('pause', () => {
+        mediaActionsRef.current.pause();
+        if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+          navigator.mediaSession.playbackState = 'paused';
+        }
+      });
+      ms.setActionHandler('previoustrack', () => {
+        mediaActionsRef.current.prev();
+      });
+      ms.setActionHandler('nexttrack', () => {
+        mediaActionsRef.current.next();
+      });
       ms.setActionHandler('seekto', (details) => {
-        if (details.seekTime !== undefined && details.seekTime !== null) {
+        if (details.seekTime !== undefined && details.seekTime !== null && !isNaN(details.seekTime)) {
           mediaActionsRef.current.seekTo(details.seekTime);
         }
       });
@@ -747,13 +608,16 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         const dur = usePlayerStore.getState().duration;
         mediaActionsRef.current.seekTo(Math.min(dur, cur + skip));
       });
-      ms.setActionHandler('stop', () => mediaActionsRef.current.pause());
-    } catch (e) {
-      console.warn('MediaSession handler registration error:', e);
-    }
+      ms.setActionHandler('stop', () => {
+        mediaActionsRef.current.pause();
+        if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+          navigator.mediaSession.playbackState = 'paused';
+        }
+      });
+    } catch {}
   }, []);
 
-  // Update MediaMetadata
+  // Sync MediaMetadata with Current Track
   useEffect(() => {
     if (currentTrack && typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       const thumbnail = getHighResImage(
@@ -768,7 +632,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         navigator.mediaSession.metadata = new MediaMetadata({
           title: currentTrack.name,
           artist,
-          album: 'Spotify',
+          album: 'PMUSIC',
           artwork: [
             { src: thumbnail, sizes: '96x96', type: 'image/jpeg' },
             { src: thumbnail, sizes: '128x128', type: 'image/jpeg' },
@@ -778,26 +642,26 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             { src: thumbnail, sizes: '512x512', type: 'image/jpeg' },
           ],
         });
-      } catch (e) {
-        console.warn('MediaMetadata configuration error:', e);
-      }
+      } catch {}
     }
   }, [currentTrack]);
 
+  // Sync MediaSession playbackState with Store isPlaying
   useEffect(() => {
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
     }
   }, [isPlaying]);
 
-  // Screen WakeLock
+  // =========================================================================
+  // Background Playback Guardian & Screen WakeLock
+  // ABSOLUTELY NEVER PAUSES AUDIO ON VISIBILITY CHANGE / PAGEHIDE / BLUR
+  // =========================================================================
   useEffect(() => {
-    let wakeLock: any = null;
-
     const requestLock = async () => {
       if (typeof navigator !== 'undefined' && 'wakeLock' in navigator && isPlaying) {
         try {
-          wakeLock = await (navigator as any).wakeLock.request('screen');
+          wakeLockRef.current = await (navigator as any).wakeLock.request('screen');
         } catch {}
       }
     };
@@ -805,33 +669,51 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (isPlaying) requestLock();
 
     const handleVisibilityChange = () => {
-      if (document.visibilityState === 'visible' && isPlaying) {
-        requestLock();
+      if (document.visibilityState === 'visible') {
+        if (usePlayerStore.getState().isPlaying) {
+          requestLock();
+          if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+            navigator.mediaSession.playbackState = 'playing';
+          }
+        }
+      } else {
+        // Tab hidden, screen locked, or minimized:
+        // NEVER PAUSE AUDIO!
+        // Reinforce MediaSession playing state to keep background audio alive!
+        if (usePlayerStore.getState().isPlaying && typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+          navigator.mediaSession.playbackState = 'playing';
+        }
       }
     };
 
     document.addEventListener('visibilitychange', handleVisibilityChange);
+
     return () => {
       document.removeEventListener('visibilitychange', handleVisibilityChange);
-      if (wakeLock) {
-        wakeLock.release().catch(() => {});
-        wakeLock = null;
+      if (wakeLockRef.current) {
+        wakeLockRef.current.release().catch(() => {});
+        wakeLockRef.current = null;
       }
     };
   }, [isPlaying]);
 
   // =========================================================================
-  // 8. Persistent Liked Songs (localStorage + IndexedDB)
+  // Persistent Liked Songs (localStorage + IndexedDB)
   // =========================================================================
-  const [likedSongs, setLikedSongs] = useState<Track[]>(() => {
-    if (typeof window !== 'undefined') {
-      try {
-        const stored = localStorage.getItem(LIKED_STORAGE_KEY);
-        if (stored) return JSON.parse(stored);
-      } catch {}
-    }
-    return [];
-  });
+  const [likedSongs, setLikedSongs] = useState<Track[]>([]);
+
+  // Safely hydrate from localStorage on client mount (prevents SSR hydration mismatch)
+  useEffect(() => {
+    try {
+      const stored = localStorage.getItem(LIKED_STORAGE_KEY) || localStorage.getItem('spotify_liked_tracks');
+      if (stored) {
+        const parsed = JSON.parse(stored);
+        if (Array.isArray(parsed) && parsed.length > 0) {
+          setLikedSongs(parsed);
+        }
+      }
+    } catch {}
+  }, []);
 
   const likedIdsRef = useRef<Set<string>>(new Set());
 
@@ -839,53 +721,60 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     likedIdsRef.current = new Set(likedSongs.map((t) => t.videoId));
   }, [likedSongs]);
 
+  // Hydrate Liked Songs from IndexedDB
   useEffect(() => {
-    let active = true;
-    db.getLikedSongs().then((idbTracks) => {
-      if (!active || !idbTracks || idbTracks.length === 0) return;
-      setLikedSongs((current) => {
-        const map = new Map<string, Track>();
-        idbTracks.forEach((t) => map.set(t.videoId, t));
-        current.forEach((t) => map.set(t.videoId, t));
-        const merged = Array.from(map.values());
-        try {
-          localStorage.setItem(LIKED_STORAGE_KEY, JSON.stringify(merged));
-        } catch {}
-        return merged;
-      });
-    });
+    let mounted = true;
+    db.getLikedSongs()
+      .then((idbSongs) => {
+        if (!mounted || !idbSongs) return;
+        setLikedSongs((prev) => {
+          const map = new Map<string, Track>();
+          prev.forEach((t) => map.set(t.videoId, t));
+          idbSongs.forEach((t) => map.set(t.videoId, t));
+          const merged = Array.from(map.values());
+          try {
+            localStorage.setItem(LIKED_STORAGE_KEY, JSON.stringify(merged));
+          } catch {}
+          return merged;
+        });
+      })
+      .catch(() => {});
+
     return () => {
-      active = false;
+      mounted = false;
     };
   }, []);
 
-  const isLiked = useCallback((videoId: string) => {
+  const isLiked = useCallback((videoId: string): boolean => {
+    if (!videoId) return false;
     return likedIdsRef.current.has(videoId);
   }, []);
 
   const toggleLike = useCallback(
     async (track: Track): Promise<boolean> => {
       if (!track?.videoId) return false;
+
       const alreadyLiked = likedIdsRef.current.has(track.videoId);
 
       setLikedSongs((prev) => {
-        const next = alreadyLiked
-          ? prev.filter((t) => t.videoId !== track.videoId)
-          : [track, ...prev];
+        let next: Track[];
+        if (alreadyLiked) {
+          next = prev.filter((t) => t.videoId !== track.videoId);
+        } else {
+          next = [track, ...prev.filter((t) => t.videoId !== track.videoId)];
+        }
         try {
           localStorage.setItem(LIKED_STORAGE_KEY, JSON.stringify(next));
         } catch {}
         return next;
       });
 
-      try {
-        if (alreadyLiked) {
-          await db.removeLikedSong(track.videoId);
-        } else {
-          await db.addLikedSong(track);
-        }
-      } catch (err) {
-        console.error('Error syncing like with IndexedDB:', err);
+      if (alreadyLiked) {
+        db.removeLikedSong(track.videoId).catch(() => {});
+        toast.info('Dihapus dari Lagu yang Disukai');
+      } else {
+        db.addLikedSong(track).catch(() => {});
+        toast.success('Disimpan ke Lagu yang Disukai');
       }
 
       return !alreadyLiked;
@@ -894,7 +783,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   );
 
   // =========================================================================
-  // 9. Global Keyboard Shortcuts
+  // Global Keyboard Shortcuts
   // =========================================================================
   useHotkeys({
     onTogglePlay: togglePlay,
@@ -909,28 +798,6 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     },
     onToggleMute: toggleMute,
   });
-
-  // =========================================================================
-  // 10. react-youtube Player Configuration (Hidden height: '0', width: '0')
-  // =========================================================================
-  const youtubeOpts = useMemo(
-    () => ({
-      height: '0',
-      width: '0',
-      playerVars: {
-        autoplay: 1,
-        controls: 0,
-        disablekb: 1,
-        fs: 0,
-        rel: 0,
-        modestbranding: 1,
-        playsinline: 1,
-        enablejsapi: 1,
-        iv_load_policy: 3,
-      },
-    }),
-    []
-  );
 
   const value = useMemo<MusicContextType>(
     () => ({
@@ -996,173 +863,6 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   return (
     <MusicContext.Provider value={value}>
-      {/* 
-        Hidden YouTube Player powered by react-youtube:
-        Rendered with height: '0', width: '0' in an off-screen container.
-        Plays music continuously in the background across all page navigations.
-      */}
-      <div
-        id="react-youtube-hidden-container"
-        aria-hidden="true"
-        style={{
-          position: 'fixed',
-          bottom: 0,
-          right: 0,
-          width: 0,
-          height: 0,
-          opacity: 0,
-          pointerEvents: 'none',
-          zIndex: -9999,
-          overflow: 'hidden',
-        }}
-      >
-        {isMounted && currentVideoId && (
-          <YouTube
-            videoId={currentVideoId}
-            id="react-youtube-player-iframe"
-            opts={youtubeOpts}
-            onReady={(event: any) => {
-              playerRef.current = event.target;
-              isPlayerReadyRef.current = true;
-              loadedTrackIdRef.current = currentVideoId;
-              const storeState = usePlayerStore.getState();
-
-              try {
-                event.target.setVolume(storeState.volume);
-                if (isMuted) {
-                  event.target.mute();
-                } else {
-                  event.target.unMute();
-                }
-                if (storeState.isPlaying) {
-                  event.target.playVideo();
-                } else {
-                  event.target.pauseVideo();
-                }
-              } catch (e) {
-                console.warn('react-youtube onReady error:', e);
-              }
-            }}
-            onStateChange={(event: any) => {
-              const state = event.data;
-              if (bufferingWatchdogRef.current) {
-                clearTimeout(bufferingWatchdogRef.current);
-                bufferingWatchdogRef.current = null;
-              }
-
-              // 1: PLAYING
-              if (state === 1) {
-                setIsBuffering(false);
-                consecutiveFailuresRef.current = 0;
-                stallRecoveryCountRef.current = 0;
-                if (!usePlayerStore.getState().isPlaying) {
-                  setPlayingStore(true);
-                }
-                if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-                  navigator.mediaSession.playbackState = 'playing';
-                }
-                try {
-                  const durRes = event.target.getDuration();
-                  if (durRes && typeof durRes.then === 'function') {
-                    durRes
-                      .then((dur: number) => {
-                        if (typeof dur === 'number' && dur > 0) setDuration(dur);
-                      })
-                      .catch(() => {});
-                  } else if (typeof durRes === 'number' && durRes > 0) {
-                    setDuration(durRes);
-                  }
-                } catch {}
-              }
-              // 2: PAUSED
-              else if (state === 2) {
-                setIsBuffering(false);
-                if (!isSeekingLockRef.current) {
-                  if (usePlayerStore.getState().isPlaying) {
-                    setPlayingStore(false);
-                  }
-                  if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-                    navigator.mediaSession.playbackState = 'paused';
-                  }
-                }
-              }
-              // 3: BUFFERING
-              else if (state === 3) {
-                setIsBuffering(true);
-                bufferingWatchdogRef.current = setTimeout(() => {
-                  handleStreamStalledRef.current();
-                }, 10000);
-              }
-              // 0: ENDED
-              else if (state === 0) {
-                setIsBuffering(false);
-                handlePlayerEndedRef.current();
-              }
-            }}
-            onError={(event: any) => {
-              setIsBuffering(false);
-              if (bufferingWatchdogRef.current) {
-                clearTimeout(bufferingWatchdogRef.current);
-                bufferingWatchdogRef.current = null;
-              }
-              handlePlayerErrorRef.current(event.data);
-            }}
-          />
-        )}
-      </div>
-      <audio
-        ref={fallbackAudioRef}
-        className="hidden"
-        preload="metadata"
-        onTimeUpdate={() => {
-          if (isFallbackActive && fallbackAudioRef.current && !isSeekingLockRef.current) {
-            const cur = fallbackAudioRef.current.currentTime;
-            if (Math.abs(cur - lastProgressRef.current) >= 0.25 || lastProgressRef.current < 0) {
-              lastProgressRef.current = cur;
-              setProgress(cur);
-            }
-          }
-        }}
-        onDurationChange={() => {
-          if (isFallbackActive && fallbackAudioRef.current && fallbackAudioRef.current.duration) {
-            setDuration(fallbackAudioRef.current.duration);
-          }
-        }}
-        onPlay={() => {
-          if (isFallbackActive) {
-            setPlayingStore(true);
-            setIsBuffering(false);
-          }
-        }}
-        onPause={() => {
-          if (isFallbackActive) {
-            setPlayingStore(false);
-          }
-        }}
-        onWaiting={() => {
-          if (isFallbackActive) {
-            setIsBuffering(true);
-          }
-        }}
-        onPlaying={() => {
-          if (isFallbackActive) {
-            setIsBuffering(false);
-          }
-        }}
-        onEnded={() => {
-          if (isFallbackActive) {
-            setIsBuffering(false);
-            handlePlayerEndedRef.current();
-          }
-        }}
-        onError={() => {
-          if (isFallbackActive) {
-            console.warn('[MusicContext] Audio stream fallback element error, skipping to next track...');
-            setIsFallbackActive(false);
-            playNext();
-          }
-        }}
-      />
       {children}
     </MusicContext.Provider>
   );

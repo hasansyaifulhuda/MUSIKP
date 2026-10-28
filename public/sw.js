@@ -1,5 +1,5 @@
-const CACHE_NAME = 'spotify-clone-v7-ytdlp-stream';
-const STATIC_ASSETS = [
+const CACHE_NAME = 'pmusic-v3-ytdlp-stream';
+Yconst STATIC_ASSETS = [
   '/',
   '/search',
   '/library',

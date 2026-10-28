@@ -9,18 +9,18 @@ import { ErrorBoundary } from '@/components/ErrorBoundary';
 import { ClientModals } from '@/components/ClientModals';
 
 export const metadata: Metadata = {
-  title: 'Spotify - Web Player: Musik untuk semua orang',
-  description: 'Spotify clone - dengarkan jutaan lagu dan podcast gratis di platform streaming musik modern.',
+  title: 'PMUSIC',
+  description: 'PMUSIC - Your Ultimate Music Player: dengarkan jutaan lagu dan podcast gratis di platform streaming musik modern.',
   manifest: '/manifest.json',
   referrer: 'no-referrer',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
-    title: 'Spotify',
+    title: 'PMUSIC',
   },
   icons: {
-    icon: 'https://f.top4top.io/p_3733w0g4e0.jpg',
-    apple: 'https://f.top4top.io/p_3733w0g4e0.jpg',
+    icon: '/icon.png',
+    apple: '/icon.png',
   },
 };
 
@@ -37,6 +37,74 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
     <html lang="id" className="dark">
       <head>
         <meta name="referrer" content="no-referrer" />
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `
+              (function() {
+                var NOISY = [
+                  "Failed to execute 'postMessage' on 'DOMWindow'",
+                  "The target origin provided",
+                  "does not match the recipient window's origin",
+                  "The play() request was interrupted",
+                  "play() failed because the user didn't interact",
+                  "message channel closed before a response was received",
+                  "ResizeObserver loop completed",
+                  "ResizeObserver loop limit exceeded",
+                  "ERR_BLOCKED_BY_CLIENT",
+                  "AbortError",
+                  "Share canceled",
+                  "www-widgetapi.js",
+                  "www.youtube.com/iframe_api",
+                  "youtube.com/generate_204",
+                  "youtube-nocookie.com",
+                  "doubleclick.net",
+                  "InvalidStateError",
+                  "database connection is closing",
+                  "transaction was aborted",
+                  "TransactionInactiveError",
+                  "NotSupportedError",
+                  "NotAllowedError",
+                  "A listener indicated an asynchronous response",
+                  "chrome-extension://",
+                  "moz-extension://",
+                  "safari-extension://",
+                  "Navigator.share is not supported",
+                  "Web Share API is not supported",
+                  "googlevideo.com",
+                  "ytimg.com"
+                ];
+                function isNoise(msg) {
+                  if (!msg) return false;
+                  var s = typeof msg === 'string' ? msg : (msg && msg.message ? msg.message : String(msg));
+                  for (var i = 0; i < NOISY.length; i++) {
+                    if (s.indexOf(NOISY[i]) !== -1) return true;
+                  }
+                  return false;
+                }
+                var origErr = console.error;
+                var origWarn = console.warn;
+                console.error = function() {
+                  for (var i = 0; i < arguments.length; i++) {
+                    if (isNoise(arguments[i])) return;
+                  }
+                  origErr.apply(console, arguments);
+                };
+                console.warn = function() {
+                  for (var i = 0; i < arguments.length; i++) {
+                    if (isNoise(arguments[i])) return;
+                  }
+                  origWarn.apply(console, arguments);
+                };
+                window.addEventListener('unhandledrejection', function(e) {
+                  if (isNoise(e.reason)) { e.preventDefault(); }
+                });
+                window.addEventListener('error', function(e) {
+                  if (isNoise(e.error) || isNoise(e.message)) { e.preventDefault(); }
+                });
+              })();
+            `,
+          }}
+        />
       </head>
       <body
         className="bg-black text-white antialiased min-h-screen selection:bg-[#1DB954] selection:text-black font-sans overflow-x-hidden"

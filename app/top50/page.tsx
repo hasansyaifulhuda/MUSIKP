@@ -25,14 +25,15 @@ export default function Top50Page() {
 
   // Calculate top 50 tracks
   const uniqueTracks = useMemo(() => {
-    return Array.from(new Map(history.map((item) => [item.track.videoId, item.track])).values());
+    const valid = history.filter((item) => item?.track?.videoId);
+    return Array.from(new Map(valid.map((item) => [item.track.videoId, item.track])).values());
   }, [history]);
 
   const topTracks = useMemo(() => {
     return uniqueTracks
       .map((track) => ({
         track,
-        count: playCounts[track.videoId] || 0,
+        count: (track?.videoId && playCounts[track.videoId]) || 0,
       }))
       .sort((a, b) => b.count - a.count)
       .slice(0, 50)
@@ -43,9 +44,10 @@ export default function Top50Page() {
     if (!searchQuery.trim()) return topTracks;
     const q = searchQuery.toLowerCase();
     return topTracks.filter((t) => {
+      if (!t?.name) return false;
       const art = Array.isArray(t.artist)
-        ? t.artist.map((a) => a.name).join(' ').toLowerCase()
-        : t.artist?.name.toLowerCase() || '';
+        ? t.artist.map((a) => a?.name).filter(Boolean).join(' ').toLowerCase()
+        : t.artist?.name?.toLowerCase() || '';
       return t.name.toLowerCase().includes(q) || art.includes(q);
     });
   }, [topTracks, searchQuery]);

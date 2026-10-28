@@ -1,12 +1,10 @@
-import YTMusic from 'ytmusic-api';
 import { searchCache } from '@/lib/cache';
 import { searchLimiter, getClientIp, createRateLimitResponse } from '@/lib/rateLimit';
 import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
+import { cookieManager } from '@/lib/cookieRotator';
+import { ytmusicClient } from '@/lib/ytmusicClient';
 
 export const dynamic = 'force-dynamic';
-
-const ytmusic = new YTMusic();
-let initialized = false;
 
 /**
  * Clean multi-tier fallback to iTunes Catalog Search.
@@ -104,50 +102,31 @@ export async function GET(request: Request) {
   try {
     const data = await searchCache.getOrFetch(cacheKey, async () => {
       // -------------------------------------------------------------
-      // Tier 1: YouTube Music API
+      // Tier 1: YouTube Music API (Resilient Singleton & Circuit Breaker)
       // -------------------------------------------------------------
-      let ytSuccess = false;
       let ytResults: any[] = [];
 
       try {
-        if (!initialized) {
-          await Promise.race([
-            ytmusic.initialize(),
-            new Promise((_, reject) => setTimeout(() => reject(new Error('YTMusic init timeout')), 5000)),
-          ]);
-          initialized = true;
-        }
-
         if (type === 'playlist') {
-          const playlists = await ytmusic.searchPlaylists(cleanQuery).catch(() => []);
+          const playlists = await ytmusicClient.searchPlaylists(cleanQuery);
           ytResults = playlists.filter((p: any) => p.playlistId && !p.playlistId.startsWith('RD'));
-          ytSuccess = ytResults.length > 0;
         } else if (type === 'artist') {
-          ytResults = await ytmusic.searchArtists(cleanQuery).catch(() => []);
-          ytSuccess = ytResults.length > 0;
+          ytResults = await ytmusicClient.searchArtists(cleanQuery);
         } else if (type === 'song') {
-          ytResults = await ytmusic.searchSongs(cleanQuery).catch(() => []);
-          ytSuccess = ytResults.length > 0;
+          ytResults = await ytmusicClient.searchSongs(cleanQuery);
         } else if (type === 'video') {
-          ytResults = await ytmusic.searchVideos(cleanQuery).catch(() => []);
-          ytSuccess = ytResults.length > 0;
+          ytResults = await ytmusicClient.searchVideos(cleanQuery);
         } else if (type === 'all') {
-          ytResults = await ytmusic.search(cleanQuery).catch(() => []);
-          ytSuccess = ytResults.length > 0;
+          ytResults = await ytmusicClient.search(cleanQuery);
         } else {
           // Default: combined search
-          const songs = await ytmusic.searchSongs(cleanQuery).catch(() => []);
-          const videos = await ytmusic.searchVideos(cleanQuery).catch(() => []);
-          const artists = await ytmusic.searchArtists(cleanQuery).catch(() => []);
-          ytResults = [...songs, ...videos, ...artists];
-          ytSuccess = ytResults.length > 0;
+          ytResults = await ytmusicClient.searchCombined(cleanQuery);
         }
-      } catch (ytErr) {
-        console.warn('[SearchRoute] YTMusic primary search failed or blocked:', ytErr);
-        ytSuccess = false;
+      } catch {
+        ytResults = [];
       }
 
-      if (ytSuccess && ytResults.length > 0) {
+      if (Array.isArray(ytResults) && ytResults.length > 0) {
         return ytResults;
       }
 
@@ -159,6 +138,7 @@ export async function GET(request: Request) {
       return itunesResults;
     });
 
+    const activeCookie = cookieManager.trackSearchUsage();
     return createSuccessResponse(
       data,
       'Hasil pencarian berhasil didapatkan',
@@ -166,6 +146,7 @@ export async function GET(request: Request) {
       {
         'Cache-Control': 'public, s-maxage=7200, stale-while-revalidate=86400',
         'X-RateLimit-Remaining': String(rateLimit.remaining),
+        'X-Cookie-Active': activeCookie ? activeCookie.split('/').pop() || 'active' : 'fallback-standard',
       }
     );
   } catch (error: any) {

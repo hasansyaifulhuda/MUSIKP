@@ -26,6 +26,7 @@ export default function ArtistPage() {
     const fetchArtist = async () => {
       try {
         const res = await fetch(`/api/artist?id=${params.id}`);
+        if (!res.ok) throw new Error('Artist not found');
         const raw = await res.json();
         const data = raw?.result !== undefined ? raw.result : raw;
         if (active) {
@@ -76,20 +77,26 @@ export default function ArtistPage() {
   };
 
   const handleShare = async () => {
-    if (navigator.share) {
+    if (typeof navigator !== 'undefined' && navigator.share) {
       try {
         await navigator.share({
-          title: artist?.name || 'Artis Spotify',
+          title: artist?.name || 'Artis PMUSIC',
           url: window.location.href,
         });
-      } catch {}
-    } else {
-      try {
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+      }
+    }
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
         await navigator.clipboard.writeText(window.location.href);
         toast.success('Tautan artis disalin ke clipboard');
-      } catch {
+      } else {
         toast.info('Tautan: ' + window.location.href);
       }
+    } catch {
+      toast.info('Tautan: ' + window.location.href);
     }
   };
 

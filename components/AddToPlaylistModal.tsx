@@ -39,7 +39,8 @@ export function AddToPlaylistModal() {
     if (!trackToAdd) return;
 
     // Check if track already exists
-    if (playlist.tracks.some((t) => t.videoId === trackToAdd.videoId)) {
+    const currentTracks = playlist.tracks || [];
+    if (currentTracks.some((t) => t.videoId === trackToAdd.videoId)) {
       toast.info('Lagu sudah ada di dalam playlist ini');
       setTrackToAdd(null);
       return;
@@ -47,7 +48,7 @@ export function AddToPlaylistModal() {
 
     const updatedPlaylist = {
       ...playlist,
-      tracks: [...playlist.tracks, trackToAdd],
+      tracks: [...currentTracks, trackToAdd],
     };
 
     await db.addPlaylist(updatedPlaylist);

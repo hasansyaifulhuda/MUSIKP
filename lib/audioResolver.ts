@@ -355,21 +355,21 @@ try {
   logStartupCookieDiagnostic();
 } catch {}
 
+import { cookieRotator } from '@/lib/cookieRotator';
+
 /**
- * Safely checks if cookies.txt exists in the project root directory and is valid.
+ * Safely retrieves the next active cookie file using multi-cookie round-robin rotation.
+ * Checks cookies1.txt - cookies5.txt and falls back to cookies.txt.
  */
 export function getCookiesPath(): string | null {
   try {
-    const cookiesPath = path.join(process.cwd(), 'cookies.txt');
-    if (fs.existsSync(cookiesPath)) {
-      const stats = fs.statSync(cookiesPath);
-      if (stats.isFile() && stats.size > 0 && cookieHealthState.isValid) {
-        cookieHealthState.hasFile = true;
-        return cookiesPath;
-      }
+    const rotatedPath = cookieRotator.getNextCookiePath();
+    if (rotatedPath) {
+      cookieHealthState.hasFile = true;
+      return rotatedPath;
     }
   } catch (err) {
-    console.warn('[AudioResolver] Warning reading cookies.txt:', err);
+    console.warn('[AudioResolver] Warning retrieving rotated cookie:', err);
   }
   cookieHealthState.hasFile = false;
   return null;
@@ -578,6 +578,7 @@ export async function resolveAudioStream(videoIdOrUrl: string): Promise<Resolved
           if (metadata.url) {
             cookieHealthState.isValid = true;
             cookieHealthState.lastChecked = Date.now();
+            cookieRotator.reportCookieSuccess(cookiesPath);
 
             actualVideoId = metadata.id || actualVideoId;
             const result: ResolvedAudioStream = {
@@ -608,6 +609,7 @@ export async function resolveAudioStream(videoIdOrUrl: string): Promise<Resolved
         for (const pattern of COOKIE_INVALID_PATTERNS) {
           if (pattern.test(res.stderr)) {
             attempt1FailedDueToCookies = true;
+            cookieRotator.reportCookieFailure(cookiesPath, res.stderr.slice(0, 150));
             logCookieWarningBanner(res.stderr.slice(0, 150));
             break;
           }

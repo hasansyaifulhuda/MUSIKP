@@ -1,8 +1,10 @@
 import { NextResponse } from 'next/server';
 import { resolveAudioStream, sanitizeVideoId } from '@/lib/audioResolver';
+import { audioCache } from '@/lib/audioCache';
 import { streamCache } from '@/lib/cache';
 import { streamLimiter, getClientIp, createRateLimitResponse } from '@/lib/rateLimit';
 import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
+import { cookieManager } from '@/lib/cookieRotator';
 
 export const dynamic = 'force-dynamic';
 
@@ -42,10 +44,73 @@ export async function GET(request: Request) {
   const isRedirectRequested = searchParams.get('redirect') === 'true';
 
   try {
-    const isCached = streamCache.has(videoId);
+    // -------------------------------------------------------------
+    // Tier 1: Check Server-Side VPS Audio Cache (Instant Hit)
+    // -------------------------------------------------------------
+    const cachedDisk = audioCache.getCachedAudio(videoId);
+
+    if (cachedDisk) {
+      // 1A. JSON Metadata for Cached Audio
+      if (isJsonRequested) {
+        return createSuccessResponse(
+          {
+            videoId,
+            title: 'Cached Audio Track',
+            streamUrl: `/api/stream?id=${encodeURIComponent(videoId)}`,
+            format: 'mp3',
+            acodec: 'mp3',
+            bitrate: 192,
+            filesize: cachedDisk.size,
+            cached: true,
+            source: 'vps-disk',
+          },
+          'Audio stream resolved from VPS disk cache',
+          200,
+          {
+            'Cache-Control': 'public, s-maxage=86400, max-age=86400',
+            'Access-Control-Allow-Origin': '*',
+            'X-Cache': 'HIT',
+            'X-Audio-Source': 'vps-disk',
+            'X-RateLimit-Remaining': String(rateLimit.remaining),
+          }
+        );
+      }
+
+      // 1B. Serve Audio File Directly from VPS Disk (with HTTP Range Seeking)
+      return audioCache.serveCachedAudio(request, cachedDisk.filePath, videoId);
+    }
+
+    // -------------------------------------------------------------
+    // Tier 2: Cache Miss - Download & Cache to VPS Disk (if applicable)
+    // -------------------------------------------------------------
+    // Only attempt disk cache download if not an iTunes lookup ID
+    if (!videoId.startsWith('itunes:') && !isJsonRequested && !isRedirectRequested) {
+      try {
+        const cachedFilePath = await audioCache.ensureAudioCached(videoId);
+        return audioCache.serveCachedAudio(request, cachedFilePath, videoId);
+      } catch (cacheDownloadErr) {
+        console.warn(
+          `[StreamRoute] VPS disk caching download failed for "${videoId}". Falling back to live stream proxy:`,
+          cacheDownloadErr
+        );
+        // Fallback to upstream live streaming proxy below
+      }
+    }
+
+    // -------------------------------------------------------------
+    // Tier 3: Upstream Stream Resolution & Live Proxy Streaming
+    // -------------------------------------------------------------
+    const isMemCached = streamCache.has(videoId);
     const stream = await resolveAudioStream(videoId);
 
-    // 3. JSON Metadata Response
+    // If stream URL was successfully resolved, trigger non-blocking disk caching in background
+    if (!videoId.startsWith('itunes:')) {
+      setTimeout(() => {
+        audioCache.ensureAudioCached(videoId).catch(() => {});
+      }, 500);
+    }
+
+    // 3A. JSON Metadata Response
     if (isJsonRequested) {
       return createSuccessResponse(
         {
@@ -57,19 +122,21 @@ export async function GET(request: Request) {
           acodec: stream.acodec,
           bitrate: stream.abr,
           filesize: stream.filesize,
-          cached: isCached,
+          cached: isMemCached,
+          source: 'upstream-cdn',
         },
         'Audio stream URL resolved successfully',
         200,
         {
           'Cache-Control': 'public, s-maxage=14400, stale-while-revalidate=86400',
           'Access-Control-Allow-Origin': '*',
+          'X-Cache': isMemCached ? 'MEM-HIT' : 'MISS',
           'X-RateLimit-Remaining': String(rateLimit.remaining),
         }
       );
     }
 
-    // 4. 302 Redirection Response
+    // 3B. 302 Redirection Response
     if (isRedirectRequested) {
       return NextResponse.redirect(stream.url, {
         status: 302,
@@ -80,7 +147,7 @@ export async function GET(request: Request) {
       });
     }
 
-    // 5. Audio Streaming Proxy Mode (High Resilience & Seeking)
+    // 3C. Live Streaming Proxy Mode (High Resilience & Seeking)
     const upstreamHeaders: Record<string, string> = {
       'User-Agent':
         stream.httpHeaders['User-Agent'] ||
@@ -115,7 +182,9 @@ export async function GET(request: Request) {
     responseHeaders.set('Accept-Ranges', 'bytes');
     responseHeaders.set('Cache-Control', 'public, max-age=14400, stale-while-revalidate=86400');
     responseHeaders.set('Access-Control-Allow-Origin', '*');
+    responseHeaders.set('X-Cache', 'PROXY-STREAM');
     responseHeaders.set('X-RateLimit-Remaining', String(rateLimit.remaining));
+    responseHeaders.set('X-Cookie-Active', cookieManager.getPoolStatus().currentActiveFilename || 'standard');
 
     const contentRange = upstreamResponse.headers.get('content-range');
     if (contentRange) {
@@ -163,6 +232,22 @@ export async function HEAD(request: Request) {
     return new Response(null, { status: 400 });
   }
 
+  // 1. Fast-Path: Check VPS Disk Cache
+  const cachedDisk = audioCache.getCachedAudio(videoId);
+  if (cachedDisk) {
+    const headers = new Headers();
+    headers.set('Content-Type', 'audio/mpeg');
+    headers.set('Accept-Ranges', 'bytes');
+    headers.set('Content-Length', String(cachedDisk.size));
+    headers.set('Cache-Control', 'public, max-age=31536000, immutable');
+    headers.set('X-Cache', 'HIT');
+    headers.set('X-Audio-Source', 'vps-disk');
+    headers.set('Access-Control-Allow-Origin', '*');
+    headers.set('X-RateLimit-Remaining', String(rateLimit.remaining));
+    return new Response(null, { status: 200, headers });
+  }
+
+  // 2. Upstream Metadata Check
   try {
     const stream = await resolveAudioStream(videoId);
     const headers = new Headers();
@@ -177,6 +262,6 @@ export async function HEAD(request: Request) {
 
     return new Response(null, { status: 200, headers });
   } catch {
-    return new Response(null, { status: 500 });
+    return new Response(null, { status: 503, headers: { 'Retry-After': '3' } });
   }
 }

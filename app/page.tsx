@@ -91,7 +91,7 @@ export default function Home() {
       try {
         const queries = [
           { key: 'hero', q: 'top hits indonesia viral', type: 'song' },
-          { key: 'speedDial', q: 'lagu hits spotify viral 2024', type: 'song' },
+          { key: 'speedDial', q: 'lagu hits viral 2024', type: 'song' },
           { key: 'quickPicks', q: 'pop indonesia hits terbaru', type: 'song' },
           { key: 'community', q: 'chill acoustic indonesia', type: 'playlist' },
           { key: 'artists', q: 'artis indonesia populer', type: 'artist' },
@@ -173,7 +173,7 @@ export default function Home() {
     };
   }, [latestHistoryId]);
 
-  // Spotify Top 6-8 Quick Play Grid items (History + SpeedDial)
+  // PMUSIC Top 6-8 Quick Play Grid items (History + SpeedDial)
   const quickGridItems = useMemo(() => {
     const list: Track[] = [];
     history.slice(0, 8).forEach((h) => {
@@ -198,7 +198,7 @@ export default function Home() {
 
   return (
     <main className="min-h-screen pt-4 pb-12 px-4 md:px-8 max-w-7xl mx-auto select-none">
-      {/* 1. Spotify Top Navigation & Filter Pills Bar */}
+      {/* 1. PMUSIC Top Navigation & Filter Pills Bar */}
       <header className="flex items-center justify-between gap-3 mb-6 pt-1">
         <div className="flex items-center overflow-x-auto no-scrollbar gap-2 flex-1 snap-x snap-mandatory py-1">
           {pills.map((pill) => {
@@ -237,12 +237,13 @@ export default function Home() {
               fill
               sizes="36px"
               className="object-cover"
+              priority
             />
           </Link>
         </div>
       </header>
 
-      {/* 3. SPOTIFY SIGNATURE 6-8 CARD QUICK PLAY GRID */}
+      {/* 3. PMUSIC SIGNATURE 6-8 CARD QUICK PLAY GRID */}
       {activeFilter === 'Semua' && quickGridItems.length > 0 && (
         <section className="mb-8">
           <div className="grid grid-cols-2 md:grid-cols-3 xl:grid-cols-4 gap-2.5 md:gap-3">
@@ -255,7 +256,14 @@ export default function Home() {
                   className="flex items-center bg-white/[0.07] hover:bg-white/[0.14] transition-colors duration-200 rounded-[4px] md:rounded-[6px] overflow-hidden cursor-pointer group shadow-sm select-none relative"
                 >
                   <div className="relative w-12 h-12 md:w-16 md:h-16 shrink-0 shadow bg-black/40">
-                    <Image src={thumb} alt={track.name} fill sizes="64px" className="object-cover" />
+                    <Image
+                      src={thumb}
+                      alt={track.name}
+                      fill
+                      sizes="64px"
+                      className="object-cover"
+                      priority={idx < 4}
+                    />
                   </div>
                   <div className="flex-1 min-w-0 px-3 flex items-center justify-between">
                     <span className="text-white text-xs md:text-sm font-bold truncate pr-2 leading-snug">
@@ -285,7 +293,7 @@ export default function Home() {
       ) : activeFilter !== 'Semua' ? (
         <div className="space-y-8">
           {filterData.map((cat, i) => (
-            <HorizontalScroll key={i} title={cat.title} tracks={cat.tracks} />
+            <HorizontalScroll key={`filter-${cat.title}-${i}`} title={cat.title} tracks={cat.tracks} />
           ))}
         </div>
       ) : (
@@ -349,7 +357,7 @@ export default function Home() {
             </section>
           )}
 
-          {/* Top Popular Artists (Round Spotify Cards) */}
+          {/* Top Popular Artists (Round PMUSIC Cards) */}
           {artists.length > 0 && (
             <section>
               <div className="flex items-center justify-between mb-3 px-1">
@@ -391,9 +399,9 @@ export default function Home() {
           {/* Categorized Shelves */}
           {categories.map((cat, i) =>
             cat.type === 'mixed' ? (
-              <MixedScroll key={i} title={cat.title} items={cat.items} />
+              <MixedScroll key={`cat-mixed-${cat.key || i}`} title={cat.title} items={cat.items} />
             ) : (
-              <HorizontalScroll key={i} title={cat.title} tracks={cat.items} />
+              <HorizontalScroll key={`cat-song-${cat.key || i}`} title={cat.title} tracks={cat.items} />
             )
           )}
 

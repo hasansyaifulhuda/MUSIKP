@@ -27,13 +27,14 @@ export default function HistoryPage() {
 
   // Filter history based on search query
   const filteredHistory = useMemo(() => {
-    if (!searchQuery.trim()) return history;
+    if (!searchQuery.trim()) return history.filter((item) => item?.track?.name);
     const q = searchQuery.toLowerCase();
     return history.filter((item) => {
+      if (!item?.track?.name) return false;
       const title = item.track.name.toLowerCase();
       const artist = Array.isArray(item.track.artist)
-        ? item.track.artist.map((a) => a.name).join(' ').toLowerCase()
-        : item.track.artist?.name.toLowerCase() || '';
+        ? item.track.artist.map((a) => a?.name).filter(Boolean).join(' ').toLowerCase()
+        : item.track.artist?.name?.toLowerCase() || '';
       return title.includes(q) || artist.includes(q);
     });
   }, [history, searchQuery]);

@@ -1,11 +1,8 @@
-import YTMusic from 'ytmusic-api';
 import { metadataCache } from '@/lib/cache';
 import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
+import { ytmusicClient } from '@/lib/ytmusicClient';
 
 export const dynamic = 'force-dynamic';
-
-const ytmusic = new YTMusic();
-let initialized = false;
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -19,28 +16,23 @@ export async function GET(request: Request) {
 
   try {
     const data = await metadataCache.getOrFetch(`playlist:${cleanId}`, async () => {
-      if (!initialized) {
-        await ytmusic.initialize();
-        initialized = true;
-      }
-
       try {
-        const playlist = (await ytmusic.getPlaylist(cleanId)) as any;
-        let videos = playlist.videos || [];
-        if (videos.length === 0) {
-          try {
-            videos = await ytmusic.getPlaylistVideos(cleanId);
-          } catch (e) {
-            console.error('Failed to get playlist videos:', e);
+        const playlist = (await ytmusicClient.getPlaylist(cleanId)) as any;
+        if (playlist) {
+          let videos = playlist.videos || [];
+          if (videos.length === 0) {
+            videos = await ytmusicClient.getPlaylistVideos(cleanId);
           }
+          return {
+            ...playlist,
+            videos,
+          };
         }
-        return {
-          ...playlist,
-          videos,
-        };
-      } catch {
-        // Fallback to album mapping
-        const album = await ytmusic.getAlbum(cleanId);
+      } catch {}
+
+      // Fallback to album mapping
+      const album = await ytmusicClient.getAlbum(cleanId);
+      if (album) {
         return {
           playlistId: album.albumId,
           name: album.name,
@@ -56,6 +48,10 @@ export async function GET(request: Request) {
         };
       }
     });
+
+    if (!data) {
+      return createErrorResponse('Playlist atau album tidak ditemukan atau server YouTube sedang sibuk.', 404);
+    }
 
     return createSuccessResponse(
       data,

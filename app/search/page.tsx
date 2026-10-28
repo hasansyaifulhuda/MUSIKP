@@ -136,7 +136,7 @@ export default function Search() {
         </form>
       </div>
 
-      {/* Spotify Pills Navigation */}
+      {/* PMUSIC Pills Navigation */}
       <div className="flex overflow-x-auto no-scrollbar gap-2 mb-6 px-4 md:px-8 snap-x snap-mandatory">
         {tabs.map((tab) => {
           const isActive = activeTab === tab;
@@ -161,7 +161,7 @@ export default function Search() {
         <div className="mb-6 px-4 md:px-8 space-y-0.5">
           {suggestions.map((suggestion, index) => (
             <div
-              key={index}
+              key={`suggestion-${suggestion}-${index}`}
               className="flex items-center justify-between px-3 py-2.5 hover:bg-white/10 rounded-lg cursor-pointer transition-colors"
               onClick={() => {
                 setQuery(suggestion);
@@ -185,7 +185,7 @@ export default function Search() {
           <div className="space-y-0.5">
             {recentSearches.map((search, index) => (
               <div
-                key={`recent-${index}`}
+                key={`recent-${search.query}-${index}`}
                 className="flex items-center justify-between px-3 py-2.5 hover:bg-white/10 rounded-lg cursor-pointer transition-colors group select-none"
                 onClick={() => {
                   setQuery(search.query);

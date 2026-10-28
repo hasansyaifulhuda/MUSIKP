@@ -34,8 +34,8 @@ export default function AlbumClient({ album }: { album: any }) {
     } else {
       await db.addSavedAlbum({
         albumId: album.albumId,
-        name: album.name,
-        artist: album.artist?.name || 'Unknown Artist',
+        name: album.name || 'Album',
+        artist: typeof album.artist === 'string' ? album.artist : album.artist?.name || 'Unknown Artist',
         thumbnails: album.thumbnails || [],
         savedAt: Date.now(),
       });
@@ -56,20 +56,26 @@ export default function AlbumClient({ album }: { album: any }) {
   };
 
   const handleShare = async () => {
-    if (navigator.share) {
+    if (typeof navigator !== 'undefined' && navigator.share) {
       try {
         await navigator.share({
-          title: album?.name || 'Album Spotify',
+          title: album?.name || 'Album PMUSIC',
           url: window.location.href,
         });
-      } catch {}
-    } else {
-      try {
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+      }
+    }
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
         await navigator.clipboard.writeText(window.location.href);
         toast.success('Tautan album disalin!');
-      } catch {
+      } else {
         toast.info('Tautan: ' + window.location.href);
       }
+    } catch {
+      toast.info('Tautan: ' + window.location.href);
     }
   };
 
@@ -85,7 +91,7 @@ export default function AlbumClient({ album }: { album: any }) {
 
       <button
         className="w-14 h-14 bg-[#1DB954] hover:bg-[#1ed760] text-black rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all shadow-xl cursor-pointer"
-        onClick={() => album?.songs?.length > 0 && playTrack(album.songs[0], album.songs, 'playlist')}
+        onClick={() => (album?.songs?.length || 0) > 0 && playTrack(album.songs[0], album.songs, 'playlist')}
         title="Putar Album"
       >
         <Play className="w-7 h-7 fill-current ml-0.5" />

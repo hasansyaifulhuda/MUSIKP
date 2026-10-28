@@ -37,9 +37,11 @@ export default function DownloadPage() {
 
   const handlePlayAll = () => {
     if (offlineTracks.length === 0) return;
-    const tracks: Track[] = offlineTracks.map((item) => item.track);
-    playTrack(tracks[0], tracks, 'playlist');
-    toast.success(`Memutar ${tracks.length} lagu offline`);
+    const tracks: Track[] = offlineTracks.map((item) => item.track).filter(Boolean);
+    if (tracks.length > 0) {
+      playTrack(tracks[0], tracks, 'playlist');
+      toast.success(`Memutar ${tracks.length} lagu offline`);
+    }
   };
 
   const handleRemoveTrack = async (videoId: string, trackName: string, e: React.MouseEvent) => {

@@ -14,7 +14,7 @@ export function PWARegister() {
     if (typeof window !== 'undefined' && 'caches' in window) {
       caches.keys().then((keys) => {
         keys.forEach((key) => {
-          if (!key.includes('v7-ytdlp-stream')) {
+          if (!key.startsWith('pmusic-')) {
             caches.delete(key).catch(() => {});
           }
         });

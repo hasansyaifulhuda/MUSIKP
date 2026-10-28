@@ -1,11 +1,8 @@
-import YTMusic from 'ytmusic-api';
 import { metadataCache } from '@/lib/cache';
 import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
+import { ytmusicClient } from '@/lib/ytmusicClient';
 
 export const dynamic = 'force-dynamic';
-
-const ytmusic = new YTMusic();
-let initialized = false;
 
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
@@ -19,11 +16,7 @@ export async function GET(request: Request) {
 
   try {
     const normalized = await metadataCache.getOrFetch(`upnext:${cleanId}`, async () => {
-      if (!initialized) {
-        await ytmusic.initialize();
-        initialized = true;
-      }
-      const upNext = await ytmusic.getUpNexts(cleanId);
+      const upNext = await ytmusicClient.getUpNexts(cleanId);
 
       return (upNext || []).map((item: any) => ({
         videoId: item.videoId,

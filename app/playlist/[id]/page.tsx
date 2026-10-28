@@ -83,14 +83,14 @@ export default function PlaylistPage() {
   }
 
   const handlePlayAll = () => {
-    if (playlist.tracks.length > 0) {
+    if ((playlist.tracks?.length || 0) > 0) {
       playTrack(playlist.tracks[0], playlist.tracks, 'playlist');
       toast.success(`Memutar "${playlist.name}"`);
     }
   };
 
   const handleShufflePlay = () => {
-    if (playlist.tracks.length === 0) return;
+    if ((playlist.tracks?.length || 0) === 0) return;
     const shuffled = [...playlist.tracks];
     for (let i = shuffled.length - 1; i > 0; i--) {
       const j = Math.floor(Math.random() * (i + 1));
@@ -101,7 +101,7 @@ export default function PlaylistPage() {
   };
 
   const handleRadio = () => {
-    if (playlist.tracks.length > 0) {
+    if ((playlist.tracks?.length || 0) > 0) {
       playTrack(playlist.tracks[0], undefined, 'similar');
       toast.info('Memulai Radio berdasarkan playlist');
     }
@@ -136,20 +136,26 @@ export default function PlaylistPage() {
   };
 
   const handleShare = async () => {
-    if (navigator.share) {
+    if (typeof navigator !== 'undefined' && navigator.share) {
       try {
         await navigator.share({
           title: playlist.name,
           url: window.location.href,
         });
-      } catch {}
-    } else {
-      try {
+        return;
+      } catch (err: any) {
+        if (err?.name === 'AbortError') return;
+      }
+    }
+    try {
+      if (typeof navigator !== 'undefined' && navigator.clipboard) {
         await navigator.clipboard.writeText(window.location.href);
         toast.success('Tautan playlist disalin ke clipboard');
-      } catch {
+      } else {
         toast.info('Tautan: ' + window.location.href);
       }
+    } catch {
+      toast.info('Tautan: ' + window.location.href);
     }
   };
 
@@ -213,7 +219,7 @@ export default function PlaylistPage() {
 
             <button
               onClick={handleShufflePlay}
-              disabled={playlist.tracks.length === 0}
+              disabled={(playlist.tracks?.length || 0) === 0}
               className="w-12 h-12 bg-white/10 hover:bg-white/20 text-white rounded-full flex items-center justify-center hover:scale-105 active:scale-95 transition-all disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               title="Putar Acak"
             >
@@ -222,39 +228,40 @@ export default function PlaylistPage() {
 
             <button
               onClick={handleRadio}
-              disabled={playlist.tracks.length === 0}
+              disabled={(playlist.tracks?.length || 0) === 0}
               className="w-12 h-12 bg-white/10 hover:bg-white/20 text-white rounded-full flex items-center justify-center transition-colors disabled:opacity-50 cursor-pointer disabled:cursor-not-allowed"
               title="Radio Berdasarkan Playlist"
             >
               <Radio className="w-5 h-5" />
             </button>
+            <div className="flex items-center gap-3">
+              {!isSelfCreated && (
+                <button
+                  onClick={handleSavePlaylist}
+                  className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center transition-colors cursor-pointer"
+                  title={isSaved ? 'Hapus dari Koleksi' : 'Simpan ke Koleksi'}
+                >
+                  {isSaved ? <BookmarkCheck className="w-5 h-5 text-[#1DB954]" /> : <BookmarkPlus className="w-5 h-5 text-white" />}
+                </button>
+              )}
 
-            {!isSelfCreated && (
-              <button
-                onClick={handleSavePlaylist}
-                className="w-12 h-12 bg-white/10 hover:bg-white/20 rounded-full flex items-center justify-center transition-colors cursor-pointer"
-                title={isSaved ? 'Hapus dari Koleksi' : 'Simpan ke Koleksi'}
-              >
-                {isSaved ? <BookmarkCheck className="w-5 h-5 text-[#1DB954]" /> : <BookmarkPlus className="w-5 h-5 text-white" />}
-              </button>
-            )}
-
-            {isSelfCreated && isSaved && (
-              <button
-                onClick={handleDeletePlaylist}
-                className="w-12 h-12 bg-white/10 hover:bg-red-500/20 text-white hover:text-red-400 rounded-full flex items-center justify-center transition-colors cursor-pointer"
-                title="Hapus Playlist"
-              >
-                <Trash2 className="w-5 h-5" />
-              </button>
-            )}
+              {isSelfCreated && isSaved && (
+                <button
+                  onClick={handleDeletePlaylist}
+                  className="w-12 h-12 bg-white/10 hover:bg-red-500/20 text-white hover:text-red-400 rounded-full flex items-center justify-center transition-colors cursor-pointer"
+                  title="Hapus Playlist"
+                >
+                  <Trash2 className="w-5 h-5" />
+                </button>
+              )}
+            </div>
           </div>
         </div>
       </div>
 
       {/* Playlist Track List */}
       <div>
-        {playlist.tracks.length === 0 ? (
+        {(playlist.tracks?.length || 0) === 0 ? (
           <div className="text-center text-white/50 py-16 space-y-2">
             <Music className="w-12 h-12 mx-auto opacity-30" />
             <p className="text-base font-semibold">Belum ada lagu di playlist ini</p>

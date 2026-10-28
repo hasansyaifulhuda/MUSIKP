@@ -203,7 +203,7 @@ export default function SettingsPage() {
           <div className="bg-[#181818] border border-white/5 rounded-2xl p-4 md:p-5 space-y-3 shadow-lg">
             <div className="flex items-center justify-between text-sm py-1">
               <span className="text-white/70">Aplikasi</span>
-              <span className="text-white font-semibold">Spotify Web Player</span>
+              <span className="text-white font-semibold">PMUSIC Web Player</span>
             </div>
             <div className="flex items-center justify-between text-sm py-1">
               <span className="text-white/70">Versi PWA</span>
