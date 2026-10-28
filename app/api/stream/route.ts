@@ -7,6 +7,7 @@ import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
 import { cookieManager } from '@/lib/cookieRotator';
 
 export const dynamic = 'force-dynamic';
+export const maxDuration = 180; // 3-minute execution limit for long yt-dlp transcoding and downloading
 
 export async function GET(request: Request) {
   // 1. In-Memory Rate Limiting Layer
@@ -42,6 +43,9 @@ export async function GET(request: Request) {
     request.headers.get('accept')?.includes('application/json');
 
   const isRedirectRequested = searchParams.get('redirect') === 'true';
+  const isDownloadRequested = searchParams.get('download') === 'true' || searchParams.get('dl') === 'true';
+  const rawTitle = searchParams.get('title') || `${videoId}.mp3`;
+  const customTitle = rawTitle.endsWith('.mp3') ? rawTitle : `${rawTitle}.mp3`;
 
   try {
     // -------------------------------------------------------------
@@ -76,8 +80,11 @@ export async function GET(request: Request) {
         );
       }
 
-      // 1B. Serve Audio File Directly from VPS Disk (with HTTP Range Seeking)
-      return audioCache.serveCachedAudio(request, cachedDisk.filePath, videoId);
+      // 1B. Serve Audio File Directly from VPS Disk (with HTTP Range Seeking & Optional Download Disposition)
+      return audioCache.serveCachedAudio(request, cachedDisk.filePath, videoId, {
+        asAttachment: isDownloadRequested,
+        filename: customTitle,
+      });
     }
 
     // -------------------------------------------------------------
@@ -87,11 +94,14 @@ export async function GET(request: Request) {
     if (!videoId.startsWith('itunes:') && !isJsonRequested && !isRedirectRequested) {
       try {
         const cachedFilePath = await audioCache.ensureAudioCached(videoId);
-        return audioCache.serveCachedAudio(request, cachedFilePath, videoId);
-      } catch (cacheDownloadErr) {
-        console.warn(
-          `[StreamRoute] VPS disk caching download failed for "${videoId}". Falling back to live stream proxy:`,
-          cacheDownloadErr
+        return audioCache.serveCachedAudio(request, cachedFilePath, videoId, {
+          asAttachment: isDownloadRequested,
+          filename: customTitle,
+        });
+      } catch (cacheDownloadErr: any) {
+        console.error(
+          `[StreamRoute] ❌ VPS disk caching failed for "${videoId}". Falling back to live stream proxy:\n` +
+          (cacheDownloadErr?.stack || cacheDownloadErr?.message || cacheDownloadErr)
         );
         // Fallback to upstream live streaming proxy below
       }
@@ -186,6 +196,11 @@ export async function GET(request: Request) {
     responseHeaders.set('X-RateLimit-Remaining', String(rateLimit.remaining));
     responseHeaders.set('X-Cookie-Active', cookieManager.getPoolStatus().currentActiveFilename || 'standard');
 
+    if (isDownloadRequested) {
+      const safeDlName = customTitle.replace(/[/\\?%*:|"<>]/g, '_');
+      responseHeaders.set('Content-Disposition', `attachment; filename="${safeDlName}"`);
+    }
+
     const contentRange = upstreamResponse.headers.get('content-range');
     if (contentRange) {
       responseHeaders.set('Content-Range', contentRange);
@@ -201,11 +216,14 @@ export async function GET(request: Request) {
       headers: responseHeaders,
     });
   } catch (error: any) {
-    console.error(`[StreamRoute] Error resolving audio for id "${videoId}":`, error?.message || error);
+    console.error(
+      `[StreamRoute] ❌ Critical error resolving audio for id "${videoId}":\n` +
+      (error?.stack || error?.message || error)
+    );
     return createErrorResponse(
       error?.message || 'Audio stream sementara tidak dapat diakses untuk lagu ini.',
       503,
-      { videoId, retryable: true }
+      { videoId, retryable: true, details: error?.message }
     );
   }
 }

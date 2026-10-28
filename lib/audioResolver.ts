@@ -395,16 +395,31 @@ function logCookieWarningBanner(reason: string) {
 }
 
 /**
+ * Configurable yt-dlp stream resolution timeout (default: 60s, min 60-120s recommended).
+ * Setting AUDIO_RESOLVER_TIMEOUT_MS to '0' or 'none' removes the timeout limit.
+ */
+const defaultResolverTimeoutMs = (() => {
+  const envTimeout = process.env.AUDIO_RESOLVER_TIMEOUT_MS;
+  if (envTimeout === '0' || envTimeout === 'none' || envTimeout === 'false') {
+    return 0; // Disabled / unlimited
+  }
+  const parsed = parseInt(envTimeout || '60000', 10);
+  return isNaN(parsed) ? 60000 : parsed;
+})();
+
+/**
  * Executes yt-dlp via child_process.spawn with:
  * - Array arguments (shell: false, immune to command injection)
- * - Strict 12-second timeout with SIGTERM + SIGKILL escalation
+ * - Extended 60-second default timeout (or disabled) with SIGTERM + SIGKILL escalation
+ * - Rich server-side console logging for debugging VPS execution
  * - Memory leak prevention: listener detachments & buffer capping
  */
 function runYtDlpProcess(
   args: string[],
-  timeoutMs = 12000
+  timeoutMs = defaultResolverTimeoutMs
 ): Promise<{ stdout: string; stderr: string; code: number | null }> {
   return new Promise((resolve, reject) => {
+    const startTime = Date.now();
     const ytDlpBin = findYtDlpBinary();
     const env = getExtendedEnv();
 
@@ -418,32 +433,44 @@ function runYtDlpProcess(
     let settled = false;
     const MAX_BUFFER = 5 * 1024 * 1024; // 5MB buffer cap
 
-    // Strict 12-second process timeout
-    const timer = setTimeout(() => {
-      if (!settled) {
-        settled = true;
-        console.warn(`[AudioResolver] Timeout: yt-dlp execution exceeded ${timeoutMs}ms. Terminating PID ${child.pid}...`);
+    let timer: NodeJS.Timeout | null = null;
+    if (timeoutMs > 0) {
+      timer = setTimeout(() => {
+        if (!settled) {
+          settled = true;
+          const elapsed = Date.now() - startTime;
+          console.error(
+            `[AudioResolver] ⏱️ TIMEOUT: yt-dlp stream resolution exceeded ${timeoutMs}ms (elapsed: ${elapsed}ms) for PID ${child.pid}!\n` +
+            `Binary: ${ytDlpBin}\n` +
+            `Args: ${args.slice(0, 8).join(' ')} ...\n` +
+            `Stderr snapshot at timeout:\n${stderr.trim() || '(no stderr produced)'}`
+          );
 
-        try {
-          child.stdout?.removeAllListeners();
-          child.stderr?.removeAllListeners();
-        } catch {}
+          try {
+            child.stdout?.removeAllListeners();
+            child.stderr?.removeAllListeners();
+          } catch {}
 
-        try {
-          child.kill('SIGTERM');
-          const forceKillTimer = setTimeout(() => {
-            try {
-              if (!child.killed) {
-                child.kill('SIGKILL');
-              }
-            } catch {}
-          }, 800);
-          if (forceKillTimer.unref) forceKillTimer.unref();
-        } catch {}
+          try {
+            child.kill('SIGTERM');
+            const forceKillTimer = setTimeout(() => {
+              try {
+                if (!child.killed) {
+                  child.kill('SIGKILL');
+                }
+              } catch {}
+            }, 1000);
+            if (forceKillTimer.unref) forceKillTimer.unref();
+          } catch {}
 
-        reject(new Error(`yt-dlp execution timed out after ${timeoutMs}ms`));
-      }
-    }, timeoutMs);
+          const timeoutError: any = new Error(`yt-dlp execution timed out after ${timeoutMs}ms (elapsed: ${elapsed}ms)`);
+          timeoutError.code = 'ETIMEDOUT';
+          timeoutError.stderr = stderr;
+          timeoutError.stdout = stdout;
+          reject(timeoutError);
+        }
+      }, timeoutMs);
+    }
 
     child.stdout.on('data', (chunk) => {
       if (stdout.length < MAX_BUFFER) {
@@ -458,7 +485,7 @@ function runYtDlpProcess(
     });
 
     const cleanup = () => {
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       try {
         child.stdout?.removeAllListeners();
         child.stderr?.removeAllListeners();
@@ -466,10 +493,16 @@ function runYtDlpProcess(
       } catch {}
     };
 
-    child.on('error', (err) => {
+    child.on('error', (err: any) => {
       if (!settled) {
         settled = true;
         cleanup();
+        console.error(
+          `[AudioResolver] ❌ Error spawning yt-dlp binary "${ytDlpBin}": ${err.message}\n` +
+          (stderr.trim() ? `Stderr:\n${stderr.trim()}` : '')
+        );
+        err.stderr = stderr;
+        err.stdout = stdout;
         reject(err);
       }
     });
@@ -555,6 +588,8 @@ export async function resolveAudioStream(videoIdOrUrl: string): Promise<Resolved
         '--no-warnings',
         '--no-playlist',
         '--no-check-certificates',
+        '--socket-timeout',
+        '30',
         '--user-agent',
         stealthUserAgent,
         '--add-header',
@@ -572,7 +607,7 @@ export async function resolveAudioStream(videoIdOrUrl: string): Promise<Resolved
       ];
 
       try {
-        const res = await runYtDlpProcess(primaryArgs, 12000);
+        const res = await runYtDlpProcess(primaryArgs, defaultResolverTimeoutMs);
         if (res.code === 0 && res.stdout.trim()) {
           const metadata = JSON.parse(res.stdout);
           if (metadata.url) {
@@ -616,21 +651,29 @@ export async function resolveAudioStream(videoIdOrUrl: string): Promise<Resolved
         }
 
         if (!attempt1FailedDueToCookies) {
-          console.warn(`[AudioResolver] Primary yt-dlp attempt failed (code ${res.code}):`, res.stderr.slice(0, 200));
+          console.error(
+            `[AudioResolver] ❌ Primary yt-dlp attempt failed (code ${res.code}) for "${actualVideoId}":\n` +
+            `Stderr Output:\n${res.stderr.trim() || '(no stderr produced)'}`
+          );
         }
       } catch (err: any) {
-        console.warn('[AudioResolver] Primary yt-dlp attempt threw:', err?.message || err);
+        console.error(
+          `[AudioResolver] ❌ Primary yt-dlp attempt threw for "${actualVideoId}": ${err?.message || err}\n` +
+          (err?.stderr ? `Captured Stderr:\n${err.stderr}\n` : '')
+        );
       }
     }
 
     // -------------------------------------------------------------
     // Attempt 2: Fallback without cookies (uses mobile/visionos clients)
     // -------------------------------------------------------------
-    console.info(`[AudioResolver] Triggering fallback resolver (without cookies) for ${rawId}...`);
+    console.info(`[AudioResolver] 🔄 Triggering fallback resolver without cookies for ${rawId} (Timeout: ${defaultResolverTimeoutMs > 0 ? defaultResolverTimeoutMs + 'ms' : 'unlimited'})...`);
     const fallbackArgs = [
       '--no-warnings',
       '--no-playlist',
       '--no-check-certificates',
+      '--socket-timeout',
+      '30',
       '--user-agent',
       getRandomStealthUserAgent(),
       '--extractor-args',
@@ -641,8 +684,17 @@ export async function resolveAudioStream(videoIdOrUrl: string): Promise<Resolved
       targetArg,
     ];
 
-    const fallbackRes = await runYtDlpProcess(fallbackArgs, 12000);
-    if (fallbackRes.code === 0 && fallbackRes.stdout.trim()) {
+    let fallbackRes: { stdout: string; stderr: string; code: number | null } | null = null;
+    try {
+      fallbackRes = await runYtDlpProcess(fallbackArgs, defaultResolverTimeoutMs);
+    } catch (fallbackErr: any) {
+      console.error(
+        `[AudioResolver] ❌ Fallback yt-dlp attempt threw for "${actualVideoId}": ${fallbackErr?.message || fallbackErr}\n` +
+        (fallbackErr?.stderr ? `Captured Stderr:\n${fallbackErr.stderr}\n` : '')
+      );
+    }
+
+    if (fallbackRes && fallbackRes.code === 0 && fallbackRes.stdout.trim()) {
       const metadata = JSON.parse(fallbackRes.stdout);
       if (metadata.url) {
         actualVideoId = metadata.id || actualVideoId;
@@ -668,6 +720,13 @@ export async function resolveAudioStream(videoIdOrUrl: string): Promise<Resolved
 
         return result;
       }
+    }
+
+    if (fallbackRes && fallbackRes.code !== 0) {
+      console.error(
+        `[AudioResolver] ❌ Fallback yt-dlp attempt failed (code ${fallbackRes.code}) for "${actualVideoId}":\n` +
+        `Stderr Output:\n${fallbackRes.stderr.trim() || '(no stderr produced)'}`
+      );
     }
 
     // -------------------------------------------------------------

@@ -26,6 +26,7 @@ class AudioCacheManager {
   private targetCleanBytes: number;
   private inFlightDownloads: Map<string, Promise<string>> = new Map();
   private isCleaning = false;
+  private downloadTimeoutMs: number;
 
   constructor() {
     this.cacheDir = path.join(process.cwd(), 'storage', 'audio-cache');
@@ -34,6 +35,15 @@ class AudioCacheManager {
     this.maxCacheBytes = Math.floor(maxGb * 1024 * 1024 * 1024);
     // Cleanup target: 85% of max capacity to avoid frequent disk thrashing
     this.targetCleanBytes = Math.floor(this.maxCacheBytes * 0.85);
+
+    // Audio download timeout: 120s default (min 60-120s). Setting AUDIO_DOWNLOAD_TIMEOUT_MS to '0' or 'none' removes timeout limit completely.
+    const envTimeout = process.env.AUDIO_DOWNLOAD_TIMEOUT_MS;
+    if (envTimeout === '0' || envTimeout === 'none' || envTimeout === 'false') {
+      this.downloadTimeoutMs = 0; // Disabled / unlimited
+    } else {
+      const parsedTimeout = parseInt(envTimeout || '120000', 10);
+      this.downloadTimeoutMs = isNaN(parsedTimeout) ? 120000 : parsedTimeout;
+    }
 
     this.ensureCacheDirExists();
     // Run an initial non-blocking cleanup check on startup
@@ -95,7 +105,12 @@ class AudioCacheManager {
    * Streams a local MP3 file directly from the VPS disk with full HTTP Range support.
    * Supports instant byte-level seeking and returns 206 Partial Content or 200 OK.
    */
-  public serveCachedAudio(request: Request, filePath: string, videoId: string): Response {
+  public serveCachedAudio(
+    request: Request,
+    filePath: string,
+    videoId: string,
+    options?: { asAttachment?: boolean; filename?: string }
+  ): Response {
     const stat = fs.statSync(filePath);
     const totalSize = stat.size;
     const rangeHeader = request.headers.get('range');
@@ -107,6 +122,12 @@ class AudioCacheManager {
     headers.set('X-Cache', 'HIT');
     headers.set('X-Audio-Source', 'vps-disk');
     headers.set('Access-Control-Allow-Origin', '*');
+
+    if (options?.asAttachment) {
+      const rawName = options.filename || `${videoId}.mp3`;
+      const safeName = rawName.replace(/[/\\?%*:|"<>]/g, '_');
+      headers.set('Content-Disposition', `attachment; filename="${safeName}"`);
+    }
 
     // 1. Partial Content Delivery (HTTP Range Seeking)
     if (rangeHeader) {
@@ -194,6 +215,12 @@ class AudioCacheManager {
       '--no-warnings',
       '--no-playlist',
       '--no-check-certificates',
+      '--socket-timeout',
+      '60',
+      '--retries',
+      '3',
+      '--fragment-retries',
+      '3',
       '--user-agent',
       stealthUserAgent,
       '--add-header',
@@ -211,21 +238,27 @@ class AudioCacheManager {
     ];
 
     let downloadedMp3Path: string | null = null;
+    const timeoutDesc = this.downloadTimeoutMs > 0 ? `${this.downloadTimeoutMs}ms` : 'unlimited / no timeout';
 
     // Attempt 1: With rotated cookie
     if (cookiePath) {
       const argsWithCookies = [...baseArgs, '--cookies', cookiePath];
       try {
         console.info(
-          `[AudioCache] Downloading audio for ${cleanId} using rotated cookie: ${path.basename(cookiePath)}...`
+          `[AudioCache] ⏳ Downloading audio for ${cleanId} using cookie "${path.basename(cookiePath)}" (Timeout: ${timeoutDesc})...`
         );
-        const res = await this.spawnProcess(ytDlpBin, argsWithCookies, extendedEnv, 30000);
+        const res = await this.spawnProcess(ytDlpBin, argsWithCookies, extendedEnv, this.downloadTimeoutMs);
 
         if (res.code === 0) {
           const expectedMp3 = `${tempPrefix}.mp3`;
           if (fs.existsSync(expectedMp3) && fs.statSync(expectedMp3).size > 10240) {
             downloadedMp3Path = expectedMp3;
             cookieRotator.reportCookieSuccess(cookiePath);
+            console.info(`[AudioCache] ✅ Primary download succeeded for ${cleanId} via cookie ${path.basename(cookiePath)}`);
+          } else {
+            console.warn(
+              `[AudioCache] ⚠️ yt-dlp finished with code 0, but output MP3 was missing or too small (<10KB) at ${expectedMp3}`
+            );
           }
         } else {
           // Check for bot detection / invalid cookies
@@ -235,21 +268,36 @@ class AudioCacheManager {
             )
           ) {
             cookieRotator.reportCookieFailure(cookiePath, res.stderr.slice(0, 150));
+            console.warn(`[AudioCache] ⚠️ Bot verification detected on cookie ${path.basename(cookiePath)}. Marking for cooldown...`);
           }
-          console.warn(`[AudioCache] Primary download attempt failed (code ${res.code}):`, res.stderr.slice(0, 180));
+          console.error(
+            `[AudioCache] ❌ Primary yt-dlp download failed for video "${cleanId}" (Exit Code: ${res.code}):\n` +
+            `Binary: ${ytDlpBin}\n` +
+            `Cookie: ${path.basename(cookiePath)}\n` +
+            `Stderr Output:\n${res.stderr.trim() || '(no stderr produced)'}`
+          );
         }
       } catch (err: any) {
-        console.warn('[AudioCache] Primary download threw error:', err?.message || err);
+        console.error(
+          `[AudioCache] ❌ Primary download threw error for "${cleanId}": ${err?.message || err}\n` +
+          (err?.stderr ? `Captured Stderr:\n${err.stderr}\n` : '')
+        );
       }
     }
 
     // Attempt 2: Fallback without cookies (visionos, android, mweb client)
     if (!downloadedMp3Path) {
-      console.info(`[AudioCache] Attempting fallback download without cookies for ${cleanId}...`);
+      console.info(`[AudioCache] 🔄 Attempting fallback download without cookies for ${cleanId} (Timeout: ${timeoutDesc})...`);
       const fallbackArgs = [
         '--no-warnings',
         '--no-playlist',
         '--no-check-certificates',
+        '--socket-timeout',
+        '60',
+        '--retries',
+        '3',
+        '--fragment-retries',
+        '3',
         '--user-agent',
         getRandomStealthUserAgent(),
         '--extractor-args',
@@ -265,24 +313,38 @@ class AudioCacheManager {
       ];
 
       try {
-        const res = await this.spawnProcess(ytDlpBin, fallbackArgs, extendedEnv, 30000);
+        const res = await this.spawnProcess(ytDlpBin, fallbackArgs, extendedEnv, this.downloadTimeoutMs);
         if (res.code === 0) {
           const expectedMp3 = `${tempPrefix}.mp3`;
           if (fs.existsSync(expectedMp3) && fs.statSync(expectedMp3).size > 10240) {
             downloadedMp3Path = expectedMp3;
+            console.info(`[AudioCache] ✅ Fallback download succeeded for ${cleanId} without cookies`);
+          } else {
+            console.warn(
+              `[AudioCache] ⚠️ Fallback yt-dlp finished with code 0, but output MP3 was missing or too small at ${expectedMp3}`
+            );
           }
         } else {
-          console.warn(`[AudioCache] Fallback download failed (code ${res.code}):`, res.stderr.slice(0, 180));
+          console.error(
+            `[AudioCache] ❌ Fallback yt-dlp download failed for video "${cleanId}" (Exit Code: ${res.code}):\n` +
+            `Binary: ${ytDlpBin}\n` +
+            `Stderr Output:\n${res.stderr.trim() || '(no stderr produced)'}`
+          );
         }
       } catch (err: any) {
-        console.warn('[AudioCache] Fallback download threw error:', err?.message || err);
+        console.error(
+          `[AudioCache] ❌ Fallback download threw error for "${cleanId}": ${err?.message || err}\n` +
+          (err?.stderr ? `Captured Stderr:\n${err.stderr}\n` : '')
+        );
       }
     }
 
     if (!downloadedMp3Path || !fs.existsSync(downloadedMp3Path)) {
       // Clean up any stray temp files
       this.cleanupTempFiles(tempPrefix);
-      throw new Error(`Gagal mendownload audio untuk video ID: ${cleanId}`);
+      const failureMsg = `Gagal mendownload audio untuk video ID: ${cleanId}. Seluruh metode unduhan (dengan cookies & fallback multi-client) gagal menyelesaikan proses.`;
+      console.error(`[AudioCache] 🚫 ${failureMsg}`);
+      throw new Error(failureMsg);
     }
 
     // Atomic move from temp to final destination
@@ -479,48 +541,77 @@ class AudioCacheManager {
     bin: string,
     args: string[],
     env: NodeJS.ProcessEnv,
-    timeoutMs = 25000
+    timeoutMs = 120000
   ): Promise<{ stdout: string; stderr: string; code: number | null }> {
     return new Promise((resolve, reject) => {
+      const startTime = Date.now();
       const child = spawn(bin, args, { env, stdio: ['ignore', 'pipe', 'pipe'] });
       let stdout = '';
       let stderr = '';
       let settled = false;
 
-      const timer = setTimeout(() => {
-        if (!settled) {
-          settled = true;
-          try {
-            child.kill('SIGTERM');
-            setTimeout(() => {
-              try {
-                if (!child.killed) child.kill('SIGKILL');
-              } catch {}
-            }, 800);
-          } catch {}
-          reject(new Error(`Process timed out after ${timeoutMs}ms`));
-        }
-      }, timeoutMs);
+      let timer: NodeJS.Timeout | null = null;
+      if (timeoutMs > 0) {
+        timer = setTimeout(() => {
+          if (!settled) {
+            settled = true;
+            const elapsed = Date.now() - startTime;
+            console.error(
+              `[AudioCache] ⏱️ TIMEOUT: yt-dlp execution exceeded ${timeoutMs}ms (elapsed: ${elapsed}ms) for PID ${child.pid}!\n` +
+              `Binary: ${bin}\n` +
+              `Args: ${args.slice(0, 8).join(' ')} ...\n` +
+              `Stderr snapshot at timeout:\n${stderr.trim() || '(no stderr produced)'}`
+            );
+
+            try {
+              child.stdout?.removeAllListeners();
+              child.stderr?.removeAllListeners();
+            } catch {}
+
+            try {
+              child.kill('SIGTERM');
+              const forceKillTimer = setTimeout(() => {
+                try {
+                  if (!child.killed) child.kill('SIGKILL');
+                } catch {}
+              }, 1200);
+              if (forceKillTimer.unref) forceKillTimer.unref();
+            } catch {}
+
+            const err: any = new Error(`yt-dlp process timed out after ${timeoutMs}ms (elapsed: ${elapsed}ms)`);
+            err.code = 'ETIMEDOUT';
+            err.stderr = stderr;
+            err.stdout = stdout;
+            reject(err);
+          }
+        }, timeoutMs);
+      }
 
       child.stdout.on('data', (d) => {
-        if (stdout.length < 2 * 1024 * 1024) stdout += d.toString();
+        if (stdout.length < 5 * 1024 * 1024) stdout += d.toString();
       });
       child.stderr.on('data', (d) => {
-        if (stderr.length < 2 * 1024 * 1024) stderr += d.toString();
+        if (stderr.length < 5 * 1024 * 1024) stderr += d.toString();
       });
 
       child.on('close', (code) => {
         if (!settled) {
           settled = true;
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
           resolve({ stdout, stderr, code });
         }
       });
 
-      child.on('error', (err) => {
+      child.on('error', (err: any) => {
         if (!settled) {
           settled = true;
-          clearTimeout(timer);
+          if (timer) clearTimeout(timer);
+          console.error(
+            `[AudioCache] ❌ Failed to execute process "${bin}": ${err.message}\n` +
+            (stderr.trim() ? `Stderr:\n${stderr.trim()}` : '')
+          );
+          err.stderr = stderr;
+          err.stdout = stdout;
           reject(err);
         }
       });

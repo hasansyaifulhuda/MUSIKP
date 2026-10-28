@@ -557,21 +557,28 @@ export const db = {
     // If no blob is supplied, fetch the direct audio stream from the proxy API
     if (!audioBlob) {
       const controller = new AbortController();
-      // 35-second overall timeout covering both handshake and blob download on mobile
-      const timeout = setTimeout(() => controller.abort(), 35000);
+      // 150-second overall timeout to allow VPS ample time to fetch, convert, and stream audio from YouTube
+      const timeout = setTimeout(() => controller.abort(), 150000);
       try {
         const res = await fetch(`/api/stream?id=${encodeURIComponent(track.videoId)}`, {
           signal: controller.signal,
         });
 
         if (!res.ok) {
-          throw new Error(`Gagal mengunduh audio (HTTP ${res.status})`);
+          let errorMsg = `HTTP ${res.status}`;
+          try {
+            const errJson = await res.json();
+            if (errJson?.message) {
+              errorMsg = errJson.message;
+            }
+          } catch {}
+          throw new Error(`Gagal mengunduh audio (${errorMsg})`);
         }
 
         const contentType = res.headers.get('content-type') || 'audio/mpeg';
         const rawBlob = await res.blob();
         if (!rawBlob || rawBlob.size === 0) {
-          throw new Error('Data audio kosong atau unduhan terputus');
+          throw new Error('Data audio kosong atau unduhan terputus dari server');
         }
 
         // Guarantee that the raw audio is stored as an actual Blob with valid audio MIME type
@@ -581,7 +588,7 @@ export const db = {
             : new Blob([rawBlob], { type: contentType.startsWith('audio/') ? contentType : 'audio/mpeg' });
       } catch (err: any) {
         if (err?.name === 'AbortError') {
-          throw new Error('Unduhan melebihi batas waktu (timeout). Koneksi terlalu lambat.');
+          throw new Error('Unduhan melebihi batas waktu (timeout). Server atau jaringan membutuhkan waktu lebih lama untuk menyelesaikan unduhan audio.');
         }
         throw err;
       } finally {
