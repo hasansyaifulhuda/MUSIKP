@@ -34,7 +34,7 @@ export const viewport: Viewport = {
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
-    <html lang="id" className="dark">
+    <html lang="id" className="dark" data-scroll-behavior="smooth">
       <head>
         <meta name="referrer" content="no-referrer" />
         <script

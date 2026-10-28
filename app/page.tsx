@@ -221,6 +221,7 @@ export default function Home() {
         <div className="flex items-center gap-2.5 shrink-0">
           <Link
             href="/history"
+            prefetch={true}
             className="p-2 bg-black/30 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/5"
             title="Riwayat Pemutaran"
           >
@@ -228,6 +229,7 @@ export default function Home() {
           </Link>
           <Link
             href="/settings"
+            prefetch={true}
             className="w-9 h-9 rounded-full overflow-hidden flex items-center justify-center relative border border-white/10 cursor-pointer hover:scale-105 transition-transform"
             title="Pengaturan"
           >

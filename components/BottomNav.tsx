@@ -25,6 +25,7 @@ export const BottomNav = memo(function BottomNav() {
             <Link
               key={item.name}
               href={item.href}
+              prefetch={true}
               className={cn(
                 'flex flex-col items-center justify-center w-full h-full py-1 transition-all select-none cursor-pointer',
                 isActive ? 'text-white font-semibold' : 'text-[#b3b3b3] hover:text-white'

@@ -26,7 +26,7 @@ export const Sidebar = memo(function Sidebar() {
     <aside className="hidden md:flex flex-col fixed top-0 left-0 bottom-24 w-64 lg:w-72 p-2 gap-2 z-30 select-none bg-black">
       {/* Brand & Main Navigation Card */}
       <div className="bg-[#121212] rounded-lg p-5 flex flex-col gap-5 border border-white/[0.04]">
-        <Link href="/" className="flex items-center gap-3 text-white group cursor-pointer">
+        <Link href="/" prefetch={true} className="flex items-center gap-3 text-white group cursor-pointer">
           <div className="w-9 h-9 rounded-full bg-[#1DB954] flex items-center justify-center text-black shadow-md shadow-[#1DB954]/20 group-hover:scale-105 transition-transform">
             <Music className="w-5 h-5 fill-current stroke-[2.5]" />
           </div>
@@ -42,6 +42,7 @@ export const Sidebar = memo(function Sidebar() {
               <Link
                 key={item.name}
                 href={item.href}
+                prefetch={true}
                 className={cn(
                   'flex items-center gap-4 px-3 py-2.5 rounded-md text-sm font-bold transition-all cursor-pointer',
                   isActive
@@ -70,6 +71,7 @@ export const Sidebar = memo(function Sidebar() {
               <Link
                 key={item.name}
                 href={item.href}
+                prefetch={true}
                 className={cn(
                   'flex items-center gap-3.5 px-3 py-2.5 rounded-md text-sm font-semibold transition-all cursor-pointer',
                   isActive
