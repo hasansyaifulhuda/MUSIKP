@@ -15,37 +15,7 @@ import { db } from '@/lib/db';
 import { toast } from '@/lib/toast';
 import { getHighResImage } from '@/lib/utils';
 
-// =========================================================================
-// Global Persistent Audio Element Singleton
-// Attached to document.body, survives all page transitions & component lifecycle
-// =========================================================================
-let persistentAudioElement: HTMLAudioElement | null = null;
-
-function getPersistentAudioElement(): HTMLAudioElement | null {
-  if (typeof window === 'undefined') return null;
-  if (!persistentAudioElement) {
-    let el = (document.getElementById('pmusic-persistent-audio') ||
-      document.getElementById('sann-persistent-audio')) as HTMLAudioElement | null;
-    if (!el) {
-      el = document.createElement('audio');
-      el.id = 'pmusic-persistent-audio';
-      el.preload = 'auto';
-      el.setAttribute('playsinline', 'true');
-      el.setAttribute('webkit-playsinline', 'true');
-      el.style.position = 'fixed';
-      el.style.bottom = '0';
-      el.style.left = '0';
-      el.style.width = '0';
-      el.style.height = '0';
-      el.style.opacity = '0';
-      el.style.pointerEvents = 'none';
-      el.style.zIndex = '-9999';
-      document.body.appendChild(el);
-    }
-    persistentAudioElement = el;
-  }
-  return persistentAudioElement;
-}
+import { getPersistentAudioElement } from '@/lib/audioElement';
 
 export interface MusicContextType {
   currentTrack: Track | null;
@@ -299,7 +269,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       const curRepeat = usePlayerStore.getState().repeatMode;
       if (curRepeat === 'one') {
         audio.currentTime = 0;
-        audio.play().catch(() => {});
+        try {
+          const p = audio.play();
+          if (p !== undefined) {
+            p.catch(() => {});
+          }
+        } catch {}
       } else {
         playNextRef.current();
       }
@@ -427,45 +402,49 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       cleanupActiveBlobUrl();
       setIsBuffering(true);
 
-      // 1. Instant Offline Playback via local IndexedDB Blob
-      try {
-        const offlineItem = await db.getOfflineTrack(targetVid);
-        if (offlineItem?.blob) {
-          const blobUrl = URL.createObjectURL(offlineItem.blob);
-          activeBlobUrlRef.current = blobUrl;
-          audio.src = blobUrl;
-          audio.currentTime = 0;
-          audio.volume = Math.max(0, Math.min(1, volume / 100));
-          audio.muted = isMuted;
-          audio.load();
-          if (autoPlay) {
-            audio.play().catch((err) => {
+      // 1. Immediately update audio source and initiate playback synchronously
+      const streamUrl = `/api/stream?id=${encodeURIComponent(targetVid)}`;
+      const isSameSrc = audio.src === streamUrl || audio.src.endsWith(encodeURIComponent(targetVid));
+
+      if (!isSameSrc) {
+        audio.src = streamUrl;
+        audio.currentTime = 0;
+        audio.volume = Math.max(0, Math.min(1, volume / 100));
+        audio.muted = isMuted;
+        audio.load();
+      }
+
+      if (autoPlay) {
+        try {
+          const playPromise = audio.play();
+          if (playPromise !== undefined) {
+            playPromise.catch((err) => {
               if (err?.name === 'NotAllowedError') {
+                // Browser policy deferred autoplay until next user gesture
                 setPlayingStore(false);
                 setIsBuffering(false);
               }
             });
           }
-          return;
-        }
-      } catch {}
-
-      // 2. High-Performance Stealth Stream via /api/stream
-      const streamUrl = `/api/stream?id=${encodeURIComponent(targetVid)}`;
-      audio.src = streamUrl;
-      audio.currentTime = 0;
-      audio.volume = Math.max(0, Math.min(1, volume / 100));
-      audio.muted = isMuted;
-      audio.load();
-
-      if (autoPlay) {
-        audio.play().catch((err) => {
-          if (err?.name === 'NotAllowedError') {
-            setPlayingStore(false);
-            setIsBuffering(false);
-          }
-        });
+        } catch {}
       }
+
+      // 2. Seamless offline check: if downloaded blob exists, swap to local blob
+      db.getOfflineTrack(targetVid)
+        .then((offlineItem) => {
+          if (offlineItem?.blob && loadedTrackIdRef.current === targetVid) {
+            const blobUrl = URL.createObjectURL(offlineItem.blob);
+            activeBlobUrlRef.current = blobUrl;
+            const wasPlaying = !audio.paused;
+            const curTime = audio.currentTime;
+            audio.src = blobUrl;
+            audio.currentTime = curTime;
+            if (wasPlaying) {
+              audio.play().catch(() => {});
+            }
+          }
+        })
+        .catch(() => {});
     },
     [volume, isMuted, cleanupActiveBlobUrl, setIsBuffering, setPlayingStore]
   );
@@ -535,11 +514,14 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    if (loadedTrackIdRef.current === currentVideoId) {
+    const audio = getPersistentAudioElement();
+    const isPlayingStore = usePlayerStore.getState().isPlaying;
+
+    if (loadedTrackIdRef.current === currentVideoId && audio && (!audio.paused || !isPlayingStore)) {
       return;
     }
 
-    loadAndPlayTrack(currentVideoId, usePlayerStore.getState().isPlaying);
+    loadAndPlayTrack(currentVideoId, isPlayingStore);
   }, [currentVideoId, loadAndPlayTrack]);
 
   // =========================================================================

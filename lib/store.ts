@@ -1,6 +1,7 @@
 import { create } from 'zustand';
 import { persist } from 'zustand/middleware';
 import { toast } from '@/lib/toast';
+import { playTrackImmediately } from './audioElement';
 
 export interface Track {
   videoId: string;
@@ -245,6 +246,12 @@ export const usePlayerStore = create<PlayerState>()(
           newIndex = 0;
         }
 
+        // Trigger immediate synchronous autoplay on user gesture
+        playTrackImmediately(targetId, true);
+
+        // Sanitize repeatMode: reset 'one' to 'off' when explicitly picking a new song
+        const nextRepeatMode = state.repeatMode === 'one' ? 'off' : state.repeatMode;
+
         set({
           currentTrack: track,
           isPlaying: true,
@@ -255,6 +262,7 @@ export const usePlayerStore = create<PlayerState>()(
           playContext: context,
           history: newHistory,
           playCounts: newPlayCounts,
+          repeatMode: nextRepeatMode,
         });
       },
 
@@ -271,6 +279,8 @@ export const usePlayerStore = create<PlayerState>()(
 
           const newPlayCounts = { ...state.playCounts };
           newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
+
+          playTrackImmediately(extractVideoId(nextTrack), true);
 
           set({
             currentTrack: nextTrack,
@@ -291,6 +301,8 @@ export const usePlayerStore = create<PlayerState>()(
 
           const newPlayCounts = { ...state.playCounts };
           newPlayCounts[nextTrack.videoId] = (newPlayCounts[nextTrack.videoId] || 0) + 1;
+
+          playTrackImmediately(extractVideoId(nextTrack), true);
 
           set({
             currentTrack: nextTrack,
@@ -342,6 +354,8 @@ export const usePlayerStore = create<PlayerState>()(
                       finalNextTracks = [nextTrack, ...others];
                     }
 
+                    playTrackImmediately(extractVideoId(nextTrack), true);
+
                     set({
                       queue: [...queue, ...finalNextTracks],
                       originalQueue: state.originalQueue.length > 0 ? [...state.originalQueue, ...nextTracks] : [],
@@ -364,6 +378,7 @@ export const usePlayerStore = create<PlayerState>()(
           const { repeatMode } = get();
           if (repeatMode === 'all' && queue.length > 0) {
             const nextTrack = queue[0];
+            playTrackImmediately(extractVideoId(nextTrack), true);
             set({
               currentTrack: nextTrack,
               queueIndex: 0,
@@ -394,6 +409,8 @@ export const usePlayerStore = create<PlayerState>()(
           const newPlayCounts = { ...state.playCounts };
           newPlayCounts[prevTrack.videoId] = (newPlayCounts[prevTrack.videoId] || 0) + 1;
 
+          playTrackImmediately(extractVideoId(prevTrack), true);
+
           set({
             currentTrack: prevTrack,
             queueIndex: prevIndex,
@@ -413,6 +430,8 @@ export const usePlayerStore = create<PlayerState>()(
 
           const newPlayCounts = { ...state.playCounts };
           newPlayCounts[prevTrack.videoId] = (newPlayCounts[prevTrack.videoId] || 0) + 1;
+
+          playTrackImmediately(extractVideoId(prevTrack), true);
 
           set({
             currentTrack: prevTrack,
@@ -438,6 +457,8 @@ export const usePlayerStore = create<PlayerState>()(
 
         const newPlayCounts = { ...state.playCounts };
         newPlayCounts[targetTrack.videoId] = (newPlayCounts[targetTrack.videoId] || 0) + 1;
+
+        playTrackImmediately(extractVideoId(targetTrack), true);
 
         set({
           currentTrack: targetTrack,
@@ -569,12 +590,17 @@ export const usePlayerStore = create<PlayerState>()(
     }),
     {
       name: 'player-storage',
+      onRehydrateStorage: () => (state) => {
+        if (state && state.repeatMode === 'one') {
+          state.repeatMode = 'off';
+        }
+      },
       partialize: (state) => ({
         history: state.history,
         playCounts: state.playCounts,
         volume: state.volume,
         isShuffle: state.isShuffle,
-        repeatMode: state.repeatMode,
+        repeatMode: state.repeatMode === 'one' ? 'off' : state.repeatMode,
       }),
     }
   )
