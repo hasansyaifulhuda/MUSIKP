@@ -33,8 +33,8 @@ export function PWARegister() {
         .then((reg) => {
           reg.update().catch(() => {});
         })
-        .catch((err) => {
-          console.error('Service Worker registration failed: ', err);
+        .catch(() => {
+          // Non-blocking fallback for restricted or unsupported Service Worker contexts
         });
     }
 

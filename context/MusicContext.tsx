@@ -124,6 +124,26 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const playNextRef = useRef<() => void>(() => {});
   const wakeLockRef = useRef<any>(null);
 
+  // User gesture & playback failure safeguards
+  const hasUserGestureRef = useRef<boolean>(false);
+  const retryCountPerTrackRef = useRef<Map<string, number>>(new Map());
+  const lastErrorTimestampRef = useRef<number>(0);
+
+  // Safely register physical user gesture (click/touch/key) to allow AudioContext creation
+  useEffect(() => {
+    const markUserInteraction = () => {
+      hasUserGestureRef.current = true;
+    };
+    window.addEventListener('pointerdown', markUserInteraction, { capture: true, passive: true });
+    window.addEventListener('keydown', markUserInteraction, { capture: true, passive: true });
+    window.addEventListener('touchstart', markUserInteraction, { capture: true, passive: true });
+    return () => {
+      window.removeEventListener('pointerdown', markUserInteraction, { capture: true });
+      window.removeEventListener('keydown', markUserInteraction, { capture: true });
+      window.removeEventListener('touchstart', markUserInteraction, { capture: true });
+    };
+  }, []);
+
   // Revoke previous object URLs to prevent memory leaks
   const cleanupActiveBlobUrl = useCallback(() => {
     if (activeBlobUrlRef.current) {
@@ -155,20 +175,36 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   }, []);
 
   // Hardware Audio Focus Keep-Alive (prevents mobile background audio ducking / suspension)
+  // SAFE: Strictly checked against physical user interaction to eliminate browser Autoplay warnings
   const initAudioContextKeepAlive = useCallback(() => {
     if (typeof window === 'undefined') return;
+
+    // Physical user gesture safeguard: Never instantiate AudioContext without user interaction
+    const isUserActive =
+      hasUserGestureRef.current ||
+      (typeof navigator !== 'undefined' && Boolean((navigator as any).userActivation?.hasBeenActive));
+
+    if (!isUserActive) {
+      return;
+    }
+
     try {
       const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
       if (!AudioCtx) return;
 
       if (!audioContextRef.current) {
         const ctx = new AudioCtx();
+        if (ctx.state === 'suspended') {
+          ctx.resume().catch(() => {});
+        }
         const osc = ctx.createOscillator();
         const gain = ctx.createGain();
         gain.gain.value = 0.00001; // Silent anchor
         osc.connect(gain);
         gain.connect(ctx.destination);
-        osc.start();
+        try {
+          osc.start();
+        } catch {}
         audioContextRef.current = ctx;
       } else if (audioContextRef.current.state === 'suspended') {
         audioContextRef.current.resume().catch(() => {});
@@ -245,6 +281,14 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const handlePlaying = () => {
       setIsBuffering(false);
       setPlayingStore(true);
+      // Reset retry count on successful track playback
+      const activeTrack = usePlayerStore.getState().currentTrack;
+      if (activeTrack) {
+        const vid = extractVideoId(activeTrack);
+        if (vid) {
+          retryCountPerTrackRef.current.delete(vid);
+        }
+      }
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
       }
@@ -262,9 +306,59 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     };
 
     const handleError = () => {
-      // Silent auto-advance on stream error to maintain clean developer console
       setIsBuffering(false);
-      playNextRef.current();
+      const audio = getPersistentAudioElement();
+      const currentTrack = usePlayerStore.getState().currentTrack;
+      const trackId = currentTrack ? extractVideoId(currentTrack) : 'unknown';
+
+      const now = Date.now();
+      // Debounce rapid duplicate error events (within 1000ms)
+      if (now - lastErrorTimestampRef.current < 1000) {
+        return;
+      }
+      lastErrorTimestampRef.current = now;
+
+      const retries = retryCountPerTrackRef.current.get(trackId) || 0;
+
+      // Retry Limit: Allow at most 1 single retry attempt per track
+      if (retries < 1 && trackId !== 'unknown' && trackId !== '') {
+        retryCountPerTrackRef.current.set(trackId, retries + 1);
+        setIsBuffering(true);
+
+        setTimeout(() => {
+          if (audio && usePlayerStore.getState().isPlaying) {
+            const streamUrl = `/api/stream?id=${encodeURIComponent(trackId)}&retry=1&t=${Date.now()}`;
+            audio.src = streamUrl;
+            audio.load();
+            audio.play().catch(() => {});
+          }
+        }, 1000);
+        return;
+      }
+
+      // If retry also failed or track is unplayable:
+      // STOP playback, pause audio, reset loading/buffering states.
+      // NEVER trigger playNext() to prevent infinite auto-skip loops!
+      if (audio) {
+        try {
+          audio.pause();
+          audio.removeAttribute('src');
+          audio.load();
+        } catch {}
+      }
+
+      setPlayingStore(false);
+      setIsBuffering(false);
+
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.playbackState = 'paused';
+        } catch {}
+      }
+
+      // Display friendly error notification to user
+      const trackName = currentTrack?.name ? `"${currentTrack.name}"` : 'lagu ini';
+      toast.error(`Gagal memutar ${trackName}. Silakan pilih lagu lain.`);
     };
 
     audio.addEventListener('timeupdate', handleTimeUpdate);
@@ -292,6 +386,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Playback Navigation (playNext, playPrev)
   // =========================================================================
   const playNext = useCallback(async () => {
+    hasUserGestureRef.current = true;
+    retryCountPerTrackRef.current.clear();
     initAudioContextKeepAlive();
     setPlayingStore(true);
     setIsBuffering(true);
@@ -308,6 +404,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   }, [playNext]);
 
   const playPrev = useCallback(() => {
+    hasUserGestureRef.current = true;
+    retryCountPerTrackRef.current.clear();
     initAudioContextKeepAlive();
     setPlayingStore(true);
     setIsBuffering(true);
@@ -341,7 +439,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           audio.muted = isMuted;
           audio.load();
           if (autoPlay) {
-            audio.play().catch(() => {});
+            audio.play().catch((err) => {
+              if (err?.name === 'NotAllowedError') {
+                setPlayingStore(false);
+                setIsBuffering(false);
+              }
+            });
           }
           return;
         }
@@ -356,10 +459,15 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       audio.load();
 
       if (autoPlay) {
-        audio.play().catch(() => {});
+        audio.play().catch((err) => {
+          if (err?.name === 'NotAllowedError') {
+            setPlayingStore(false);
+            setIsBuffering(false);
+          }
+        });
       }
     },
-    [volume, isMuted, cleanupActiveBlobUrl, setIsBuffering]
+    [volume, isMuted, cleanupActiveBlobUrl, setIsBuffering, setPlayingStore]
   );
 
   // =========================================================================
@@ -367,6 +475,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // =========================================================================
   const playTrack = useCallback(
     async (track: any, queue?: any[], context?: 'playlist' | 'similar', forceIndex?: number) => {
+      hasUserGestureRef.current = true;
+      retryCountPerTrackRef.current.clear();
       initAudioContextKeepAlive();
 
       const targetVideoId = extractVideoId(track);
@@ -389,6 +499,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   const playQueueIndex = useCallback(
     async (index: number) => {
+      hasUserGestureRef.current = true;
+      retryCountPerTrackRef.current.clear();
       initAudioContextKeepAlive();
       setPlayingStore(true);
       setIsBuffering(true);
@@ -434,6 +546,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Playback Control Handlers (Play, Pause, Seek, Volume, Mute)
   // =========================================================================
   const togglePlay = useCallback(() => {
+    hasUserGestureRef.current = true;
     initAudioContextKeepAlive();
     const audio = getPersistentAudioElement();
     const currentStore = usePlayerStore.getState();
@@ -449,7 +562,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             audio.load();
           }
         }
-        audio.play().catch(() => {});
+        audio.play().catch((err) => {
+          if (err?.name === 'NotAllowedError') {
+            setPlayingStore(false);
+            setIsBuffering(false);
+          }
+        });
       } else {
         audio.pause();
       }
@@ -458,11 +576,14 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = nextPlaying ? 'playing' : 'paused';
     }
-  }, [setPlayingStore, initAudioContextKeepAlive]);
+  }, [setPlayingStore, setIsBuffering, initAudioContextKeepAlive]);
 
   const setPlaying = useCallback(
     (playing: boolean) => {
-      initAudioContextKeepAlive();
+      if (playing) {
+        hasUserGestureRef.current = true;
+        initAudioContextKeepAlive();
+      }
       setPlayingStore(playing);
       const audio = getPersistentAudioElement();
 
@@ -475,7 +596,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
               audio.load();
             }
           }
-          audio.play().catch(() => {});
+          audio.play().catch((err) => {
+            if (err?.name === 'NotAllowedError') {
+              setPlayingStore(false);
+              setIsBuffering(false);
+            }
+          });
         } else {
           audio.pause();
         }
@@ -485,7 +611,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
       }
     },
-    [setPlayingStore, initAudioContextKeepAlive]
+    [setPlayingStore, setIsBuffering, initAudioContextKeepAlive]
   );
 
   const seekTo = useCallback(

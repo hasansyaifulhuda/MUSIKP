@@ -47,6 +47,7 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
                   "does not match the recipient window's origin",
                   "The play() request was interrupted",
                   "play() failed because the user didn't interact",
+                  "The AudioContext was not allowed to start",
                   "message channel closed before a response was received",
                   "ResizeObserver loop completed",
                   "ResizeObserver loop limit exceeded",
