@@ -1,42 +1,48 @@
-import { NextResponse } from 'next/server';
 import YTMusic from 'ytmusic-api';
-import { MemoryCache } from '@/lib/apiCache';
+import { metadataCache } from '@/lib/cache';
+import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
 
 export const dynamic = 'force-dynamic';
 
 const ytmusic = new YTMusic();
 let initialized = false;
 
-// 2-Hour in-memory cache for albums
-const albumCache = new MemoryCache(300, 1000 * 60 * 120);
-
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get('id');
 
-  if (!id) {
-    return NextResponse.json({ error: 'Album ID is required' }, { status: 400 });
+  if (!id || !id.trim()) {
+    return createErrorResponse('Parameter "id" album wajib disertakan.', 400);
   }
 
+  const cleanId = id.trim();
+
   try {
-    const album = await albumCache.getOrFetch(id, async () => {
+    const album = await metadataCache.getOrFetch(`album:${cleanId}`, async () => {
       if (!initialized) {
         await ytmusic.initialize();
         initialized = true;
       }
-      return await ytmusic.getAlbum(id);
+      return await ytmusic.getAlbum(cleanId);
     });
 
-    return NextResponse.json(album, {
-      headers: {
+    return createSuccessResponse(
+      album,
+      'Detail album berhasil dimuat',
+      200,
+      {
         'Cache-Control': 'public, s-maxage=7200, stale-while-revalidate=86400',
-      },
-    });
+      }
+    );
   } catch (error: any) {
     if (error?.isAxiosError && error?.response?.status === 400) {
-      return NextResponse.json({ error: 'Invalid album ID' }, { status: 400 });
+      return createErrorResponse('ID album tidak valid atau tidak ditemukan.', 400);
     }
-    console.error(`Album error for id ${id}:`, error?.message || error);
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    console.error(`Album error for id ${cleanId}:`, error?.message || error);
+    return createErrorResponse(
+      error?.message || 'Gagal memuat detail album.',
+      500,
+      { albumId: cleanId }
+    );
   }
 }

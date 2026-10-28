@@ -311,7 +311,8 @@ export const usePlayerStore = create<PlayerState>()(
               clearTimeout(timeoutId);
 
               if (res && res.ok) {
-                const data = await res.json().catch(() => []);
+                const raw = await res.json().catch(() => []);
+                const data = Array.isArray(raw) ? raw : (raw?.result || []);
                 if (Array.isArray(data) && data.length > 0) {
                   const nextTracks = data
                     .filter((t: any) => {

@@ -28,7 +28,8 @@ export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playl
       try {
         const res = await fetch(`/api/ytplaylist?id=${playlistId}`);
         if (res.ok) {
-          const data = await res.json();
+          const raw = await res.json();
+          const data = raw?.result !== undefined ? raw.result : raw;
           if (active) {
             setPlaylist({
               ...data,

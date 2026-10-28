@@ -1,36 +1,35 @@
-import { NextResponse } from 'next/server';
 import YTMusic from 'ytmusic-api';
-import { MemoryCache } from '@/lib/apiCache';
+import { metadataCache } from '@/lib/cache';
+import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
 
 export const dynamic = 'force-dynamic';
 
 const ytmusic = new YTMusic();
 let initialized = false;
 
-// 2-Hour in-memory cache with request deduplication
-const playlistCache = new MemoryCache(400, 1000 * 60 * 120);
-
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get('id');
 
-  if (!id || id === 'undefined' || id === 'null') {
-    return NextResponse.json({ error: 'Missing or invalid id' }, { status: 400 });
+  if (!id || id === 'undefined' || id === 'null' || !id.trim()) {
+    return createErrorResponse('Parameter "id" playlist/album wajib disertakan.', 400);
   }
 
+  const cleanId = id.trim();
+
   try {
-    const data = await playlistCache.getOrFetch(id, async () => {
+    const data = await metadataCache.getOrFetch(`playlist:${cleanId}`, async () => {
       if (!initialized) {
         await ytmusic.initialize();
         initialized = true;
       }
 
       try {
-        const playlist = (await ytmusic.getPlaylist(id)) as any;
+        const playlist = (await ytmusic.getPlaylist(cleanId)) as any;
         let videos = playlist.videos || [];
         if (videos.length === 0) {
           try {
-            videos = await ytmusic.getPlaylistVideos(id);
+            videos = await ytmusic.getPlaylistVideos(cleanId);
           } catch (e) {
             console.error('Failed to get playlist videos:', e);
           }
@@ -39,9 +38,9 @@ export async function GET(request: Request) {
           ...playlist,
           videos,
         };
-      } catch (e: any) {
+      } catch {
         // Fallback to album mapping
-        const album = await ytmusic.getAlbum(id);
+        const album = await ytmusic.getAlbum(cleanId);
         return {
           playlistId: album.albumId,
           name: album.name,
@@ -58,19 +57,22 @@ export async function GET(request: Request) {
       }
     });
 
-    return NextResponse.json(data, {
-      headers: {
+    return createSuccessResponse(
+      data,
+      'Playlist berhasil dimuat',
+      200,
+      {
         'Cache-Control': 'public, s-maxage=7200, stale-while-revalidate=86400',
-      },
-    });
+      }
+    );
   } catch (error: any) {
     if (error?.name === 'ZodError') {
-      return NextResponse.json({ error: 'ZodError', details: error.issues }, { status: 500 });
+      return createErrorResponse('Data playlist tidak dapat diparse (ZodError).', 500, { details: error.issues });
     }
     if (error?.isAxiosError && error?.response?.status === 400) {
-      return NextResponse.json({ error: 'Invalid playlist/album ID' }, { status: 400 });
+      return createErrorResponse('ID playlist/album tidak valid.', 400);
     }
-    console.error(`Error fetching playlist/album for id ${id}:`, error?.message || error);
-    return NextResponse.json({ error: 'Failed to fetch playlist' }, { status: 500 });
+    console.error(`Error fetching playlist/album for id ${cleanId}:`, error?.message || error);
+    return createErrorResponse('Gagal memuat playlist atau album.', 500, { playlistId: cleanId });
   }
 }

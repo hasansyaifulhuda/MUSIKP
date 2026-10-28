@@ -40,7 +40,8 @@ export default function PlaylistPage() {
           // Try fetching from YouTube Music API
           const res = await fetch(`/api/ytplaylist?id=${id}`);
           if (res.ok && active) {
-            const ytData = await res.json();
+            const raw = await res.json();
+            const ytData = raw?.result !== undefined ? raw.result : raw;
             setPlaylist({
               id: ytData.playlistId || ytData.id || id,
               name: ytData.name || ytData.title || 'Playlist',

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useMemo } from 'react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
 import { db, RecentSearch } from '@/lib/db';
 import { TrackItem } from '@/components/TrackItem';
 import { ArtistItem } from '@/components/ArtistItem';
@@ -46,7 +46,8 @@ export default function Search() {
         try {
           const res = await fetch(`/api/suggest?q=${encodeURIComponent(query)}`);
           if (res.ok) {
-            const data = await res.json();
+            const raw = await res.json();
+            const data = Array.isArray(raw) ? raw : (raw?.result || []);
             setSuggestions(data);
           }
         } catch {
@@ -61,7 +62,7 @@ export default function Search() {
     return () => clearTimeout(debounceTimer);
   }, [query]);
 
-  const handleSearch = async (searchQuery: string) => {
+  const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) return;
     setLoading(true);
     setIsFocused(false);
@@ -74,7 +75,8 @@ export default function Search() {
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
       if (res.ok) {
-        const data = await res.json();
+        const raw = await res.json();
+        const data = Array.isArray(raw) ? raw : raw?.result || [];
         setResults(data);
       }
     } catch (error) {
@@ -82,19 +84,19 @@ export default function Search() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
-  const onSubmit = (e: React.FormEvent) => {
+  const onSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();
     handleSearch(query);
-  };
+  }, [handleSearch, query]);
 
-  const handleRemoveRecentSearch = async (e: React.MouseEvent, queryToRemove: string) => {
+  const handleRemoveRecentSearch = useCallback(async (e: React.MouseEvent, queryToRemove: string) => {
     e.stopPropagation();
     await db.removeRecentSearch(queryToRemove);
     const searches = await db.getRecentSearches();
     setRecentSearches(searches);
-  };
+  }, []);
 
   return (
     <main className="min-h-screen pt-4 pb-32 max-w-5xl mx-auto select-none">

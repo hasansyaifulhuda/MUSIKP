@@ -61,7 +61,8 @@ export default function Home() {
         for (const { title, q } of queries) {
           const res = await fetch(`/api/search?q=${encodeURIComponent(q)}&type=song`);
           if (res.ok) {
-            const data = await res.json();
+            const raw = await res.json();
+            const data = Array.isArray(raw) ? raw : raw?.result || [];
             results.push({ title, tracks: data.slice(0, 10) });
           }
         }
@@ -110,7 +111,8 @@ export default function Home() {
                 : `/api/search?q=${encodeURIComponent(q)}`;
               const res = await fetch(url);
               if (!res.ok) return { key, title, data: [] };
-              const data = await res.json();
+              const raw = await res.json();
+              const data = Array.isArray(raw) ? raw : raw?.result || [];
               return { key, title, data };
             } catch {
               return { key, title, data: [] };

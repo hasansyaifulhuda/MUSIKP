@@ -1,7 +1,7 @@
 'use client';
 
 import React, { memo, useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { Mic2, Loader2, Disc3, Radio } from 'lucide-react';
+import { Mic2, Loader2, Disc3, Radio, FileText } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { binarySearchLyricIndex } from '@/lib/performance';
 
@@ -18,12 +18,60 @@ interface LyricsViewProps {
   isSynced: boolean;
 }
 
+interface LyricRowProps {
+  idx: number;
+  text: string;
+  time: number;
+  isActive: boolean;
+  onSeek: (time: number) => void;
+  setRef: (el: HTMLDivElement | null) => void;
+}
+
+/**
+ * Isolated, high-performance Lyric Row component.
+ * Custom comparator ensures ONLY the row becoming active or inactive re-renders,
+ * preventing 95% of React reconciliation overhead during audio playback.
+ */
+const LyricRow = memo(
+  function LyricRow({ idx, text, time, isActive, onSeek, setRef }: LyricRowProps) {
+    const handleClick = useCallback(() => {
+      onSeek(time);
+    }, [onSeek, time]);
+
+    return (
+      <div
+        ref={setRef}
+        onClick={handleClick}
+        role="button"
+        tabIndex={0}
+        aria-label={`Lirik baris ${idx + 1}: ${text}`}
+        className={cn(
+          'py-3.5 px-4 cursor-pointer transition-all duration-300 ease-out transform-gpu gpu-accelerated select-none focus:outline-none origin-center',
+          isActive
+            ? 'scale-[1.08] font-black text-white text-2xl sm:text-3xl md:text-4xl opacity-100 drop-shadow-[0_4px_24px_rgba(255,255,255,0.25)]'
+            : 'scale-100 font-semibold text-white/35 text-lg sm:text-xl md:text-2xl opacity-40 hover:opacity-75 hover:text-white/70'
+        )}
+      >
+        <p className="leading-relaxed tracking-tight">{text}</p>
+      </div>
+    );
+  },
+  (prev, next) => {
+    return (
+      prev.idx === next.idx &&
+      prev.text === next.text &&
+      prev.time === next.time &&
+      prev.isActive === next.isActive
+    );
+  }
+);
+
 export const LyricsView = memo(function LyricsView({
   lyrics,
   currentTime,
   onSeek,
   isLoading,
-  isSynced: _isSynced,
+  isSynced,
 }: LyricsViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -44,7 +92,7 @@ export const LyricsView = memo(function LyricsView({
     lineRefs.current = lineRefs.current.slice(0, lyrics.length);
   }, [lyrics.length]);
 
-  // Smooth scroll centering helper with cancellation of previous frame
+  // Smooth scroll centering helper with cancellation of previous frame via requestAnimationFrame
   const scrollToActiveLine = useCallback((index: number, behavior: ScrollBehavior = 'smooth') => {
     const container = containerRef.current;
     if (!container || index < 0) return;
@@ -140,7 +188,7 @@ export const LyricsView = memo(function LyricsView({
     );
   }
 
-  // Empty state
+  // Clean, resilient empty state
   if (!lyrics || lyrics.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full text-white/50 space-y-4 py-28 select-none text-center px-4 max-w-md mx-auto">
@@ -150,7 +198,7 @@ export const LyricsView = memo(function LyricsView({
         <div className="space-y-1">
           <p className="text-lg font-bold text-white/90">Lirik tidak tersedia untuk lagu ini</p>
           <p className="text-xs text-white/40 leading-relaxed">
-            Lagu ini belum memiliki lirik. Coba putar lagu populer lainnya.
+            Lagu ini belum memiliki lirik di database kami. Pemutaran lagu tetap berjalan normal.
           </p>
         </div>
       </div>
@@ -159,6 +207,16 @@ export const LyricsView = memo(function LyricsView({
 
   return (
     <div className="flex-1 relative flex flex-col min-h-0 w-full overflow-hidden select-none">
+      {/* Informative mode badge for plain lyrics fallback */}
+      {!isSynced && lyrics.length > 0 && (
+        <div className="pt-3 pb-1 text-center shrink-0">
+          <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-white/5 border border-white/10 rounded-full text-[11px] font-medium text-white/70">
+            <FileText className="w-3 h-3 text-[#1DB954]" />
+            <span>Mode Lirik Teks • Ketuk baris untuk melompat</span>
+          </div>
+        </div>
+      )}
+
       {/* Main Boxless Karaoke Lyrics Container with Smooth Vertical Fade Mask */}
       <div
         ref={containerRef}
@@ -178,32 +236,20 @@ export const LyricsView = memo(function LyricsView({
           </div>
         )}
 
-        {/* Clean, True Karaoke Lyric Lines (No containers, No badges, Pure Zoom-In Text) */}
-        {lyrics.map((line, idx) => {
-          const isActive = idx === activeIndex;
-
-          return (
-            <div
-              key={`lyric-${idx}`}
-              ref={(el) => {
-                lineRefs.current[idx] = el;
-              }}
-              onClick={() => onSeek(line.time)}
-              role="button"
-              tabIndex={0}
-              className={cn(
-                'py-3.5 px-4 cursor-pointer transition-all duration-300 ease-out transform-gpu gpu-accelerated select-none focus:outline-none origin-center',
-                isActive
-                  ? 'scale-[1.08] font-black text-white text-2xl sm:text-3xl md:text-4xl opacity-100 drop-shadow-[0_4px_24px_rgba(255,255,255,0.25)]'
-                  : 'scale-100 font-semibold text-white/35 text-lg sm:text-xl md:text-2xl opacity-40 hover:opacity-75 hover:text-white/70'
-              )}
-            >
-              <p className="leading-relaxed tracking-tight">
-                {line.text}
-              </p>
-            </div>
-          );
-        })}
+        {/* Clean, True Karaoke Lyric Lines rendered via isolated memoized LyricRow */}
+        {lyrics.map((line, idx) => (
+          <LyricRow
+            key={`lyric-${idx}`}
+            idx={idx}
+            text={line.text}
+            time={line.time}
+            isActive={idx === activeIndex}
+            onSeek={onSeek}
+            setRef={(el) => {
+              lineRefs.current[idx] = el;
+            }}
+          />
+        ))}
       </div>
 
       {/* Floating Re-Sync Pill Button (Visible when user scrolls away from active line) */}

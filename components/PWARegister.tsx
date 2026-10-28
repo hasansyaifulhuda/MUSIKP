@@ -14,14 +14,20 @@ export function PWARegister() {
     if (typeof window !== 'undefined' && 'caches' in window) {
       caches.keys().then((keys) => {
         keys.forEach((key) => {
-          if (key.includes('spotify') && !key.includes('v6-client-audio-instant')) {
+          if (!key.includes('v7-ytdlp-stream')) {
             caches.delete(key).catch(() => {});
           }
         });
       });
     }
 
-    if ('serviceWorker' in navigator) {
+    if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+      navigator.serviceWorker.getRegistrations().then((registrations) => {
+        for (const reg of registrations) {
+          reg.update().catch(() => {});
+        }
+      });
+
       navigator.serviceWorker
         .register('/sw.js')
         .then((reg) => {

@@ -143,9 +143,10 @@ export function Player() {
       .then((res) => (res.ok ? res.json() : { synced: false, lyrics: [] }))
       .then((data) => {
         if (!isCancelled) {
-          if (Array.isArray(data?.lyrics) && data.lyrics.length > 0) {
-            setLyrics(data.lyrics);
-            setIsSyncedLyrics(Boolean(data.synced));
+          const payload = data?.result !== undefined ? data.result : data;
+          if (Array.isArray(payload?.lyrics) && payload.lyrics.length > 0) {
+            setLyrics(payload.lyrics);
+            setIsSyncedLyrics(Boolean(payload.synced));
           } else {
             setLyrics([]);
             setIsSyncedLyrics(false);

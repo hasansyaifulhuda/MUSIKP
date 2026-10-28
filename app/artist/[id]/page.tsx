@@ -26,7 +26,8 @@ export default function ArtistPage() {
     const fetchArtist = async () => {
       try {
         const res = await fetch(`/api/artist?id=${params.id}`);
-        const data = await res.json();
+        const raw = await res.json();
+        const data = raw?.result !== undefined ? raw.result : raw;
         if (active) {
           setArtist(data);
           if (data && data.artistId) {

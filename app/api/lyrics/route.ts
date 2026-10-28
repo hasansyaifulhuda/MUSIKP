@@ -1,5 +1,6 @@
-import { NextResponse } from 'next/server';
+import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
 import YTMusic from 'ytmusic-api';
+import { MemoryCache } from '@/lib/cache';
 
 const ytmusic = new YTMusic();
 let initialized = false;
@@ -8,8 +9,6 @@ interface LyricLine {
   time: number;
   text: string;
 }
-
-import { MemoryCache } from '@/lib/apiCache';
 
 const lyricsCache = new MemoryCache<{ synced: boolean; lyrics: LyricLine[] }>(600, 1000 * 60 * 60 * 24);
 
@@ -74,18 +73,16 @@ export async function GET(request: Request) {
   const duration = durationParam ? parseFloat(durationParam) : 200;
 
   if (!id && !title) {
-    return NextResponse.json({ synced: false, lyrics: [] }, { status: 400 });
+    return createErrorResponse('Parameter "id" atau "title" wajib disertakan.', 400);
   }
 
   // Cache key
   const cacheKey = `${id || ''}_${title}_${artist}`.toLowerCase();
   const cached = lyricsCache.get(cacheKey);
   if (cached) {
-    return NextResponse.json(cached, {
-      headers: {
-        'Cache-Control': 'public, s-maxage=86400, stale-while-revalidate=604800',
-        'X-Cache': 'HIT',
-      },
+    return createSuccessResponse(cached, 'Lirik lagu berhasil dimuat', 200, {
+      'Cache-Control': 'public, s-maxage=86400, stale-while-revalidate=604800',
+      'X-Cache': 'HIT',
     });
   }
 
@@ -235,13 +232,32 @@ export async function GET(request: Request) {
       }
     }
 
+    // 5. TIER 5: Fallback to Lyrics.ovh API for plain lyrics
+    if (cleanTitle && cleanArtist) {
+      try {
+        const ovhUrl = `https://api.lyrics.ovh/v1/${encodeURIComponent(cleanArtist)}/${encodeURIComponent(cleanTitle)}`;
+        const res = await fetchWithTimeout(ovhUrl, 2500);
+        if (res && res.ok) {
+          const ovhData = await res.json();
+          if (ovhData.lyrics && typeof ovhData.lyrics === 'string') {
+            const cleanOvhText = ovhData.lyrics
+              .replace(/^.*Paroles de la chanson.*\n?/im, '')
+              .replace(/\[[^\]]+\]/g, '')
+              .trim();
+            if (cleanOvhText.length > 20) {
+              const parsed = parsePlainLyrics(cleanOvhText, duration);
+              if (parsed.length > 0) return { synced: false, lyrics: parsed };
+            }
+          }
+        }
+      } catch {}
+    }
+
     return { synced: false, lyrics: [] };
   });
 
-  return NextResponse.json(result, {
-    headers: {
-      'Cache-Control': 'public, s-maxage=86400, stale-while-revalidate=604800',
-      'X-Cache': 'MISS',
-    },
+  return createSuccessResponse(result, 'Lirik lagu berhasil dimuat', 200, {
+    'Cache-Control': 'public, s-maxage=86400, stale-while-revalidate=604800',
+    'X-Cache': 'MISS',
   });
 }

@@ -1,0 +1,41 @@
+{
+  "version": "5",
+  "specifiers": {
+    "jsr:@deno/installer-shell-setup@*": "0.3.4"
+  },
+  "jsr": {
+    "@deno/installer-shell-setup@0.3.4": {
+      "integrity": "48665d1a737d487cce6874bc97bba70a5aeffa7053aca3f60df93c6fab8963b4"
+    }
+  },
+  "workspace": {
+    "packageJson": {
+      "dependencies": [
+        "npm:@tailwindcss/postcss@4.1.11",
+        "npm:@tailwindcss/typography@~0.5.19",
+        "npm:@types/node@20",
+        "npm:@types/react-dom@19",
+        "npm:@types/react@19",
+        "npm:autoprefixer@^10.4.21",
+        "npm:clsx@^2.1.1",
+        "npm:eslint-config-next@16.0.8",
+        "npm:eslint@9.39.1",
+        "npm:fast-average-color@^9.5.0",
+        "npm:firebase-tools@15",
+        "npm:idb@^8.0.3",
+        "npm:lucide-react@0.553",
+        "npm:motion@^12.23.24",
+        "npm:next@^15.4.9",
+        "npm:postcss@^8.5.6",
+        "npm:react-dom@^19.2.1",
+        "npm:react-youtube@^10.1.0",
+        "npm:react@^19.2.1",
+        "npm:tailwind-merge@^3.3.1",
+        "npm:tailwindcss@4.1.11",
+        "npm:typescript@5.9.3",
+        "npm:ytmusic-api@^5.3.1",
+        "npm:zustand@^5.0.12"
+      ]
+    }
+  }
+}

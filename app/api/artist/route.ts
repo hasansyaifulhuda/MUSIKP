@@ -1,28 +1,29 @@
-import { NextResponse } from 'next/server';
 import YTMusic from 'ytmusic-api';
-import { MemoryCache } from '@/lib/apiCache';
+import { metadataCache } from '@/lib/cache';
+import { createErrorResponse, createSuccessResponse } from '@/lib/apiResponse';
 
 export const dynamic = 'force-dynamic';
 
 const ytmusic = new YTMusic();
 let initialized = false;
 
-// 2-Hour in-memory cache for artist profiles
-const artistCache = new MemoryCache(200, 1000 * 60 * 120);
-
 export async function GET(request: Request) {
   const { searchParams } = new URL(request.url);
   const id = searchParams.get('id');
 
-  if (!id) return NextResponse.json({ error: 'Artist ID required' }, { status: 400 });
+  if (!id || !id.trim()) {
+    return createErrorResponse('Parameter "id" artist wajib disertakan.', 400);
+  }
+
+  const cleanId = id.trim();
 
   try {
-    const artist = await artistCache.getOrFetch(id, async () => {
+    const artist = await metadataCache.getOrFetch(`artist:${cleanId}`, async () => {
       if (!initialized) {
         await ytmusic.initialize();
         initialized = true;
       }
-      const data = await ytmusic.getArtist(id);
+      const data = await ytmusic.getArtist(cleanId);
 
       // Fix ytmusic-api bug where carousels are shifted for artists with extra carousels (like "Live performances")
       if (data.featuredOn && data.featuredOn.length > 0 && data.featuredOn[0].playlistId === data.artistId) {
@@ -60,19 +61,26 @@ export async function GET(request: Request) {
       return data;
     });
 
-    return NextResponse.json(artist, {
-      headers: {
+    return createSuccessResponse(
+      artist,
+      'Profil artis berhasil dimuat',
+      200,
+      {
         'Cache-Control': 'public, s-maxage=7200, stale-while-revalidate=86400',
-      },
-    });
+      }
+    );
   } catch (error: any) {
     if (error?.name === 'ZodError') {
-      return NextResponse.json({ error: 'ZodError', details: error.issues }, { status: 500 });
+      return createErrorResponse('Data artis tidak dapat diparse (ZodError).', 500, { details: error.issues });
     }
     if (error?.isAxiosError && error?.response?.status === 400) {
-      return NextResponse.json({ error: 'Invalid artist ID' }, { status: 400 });
+      return createErrorResponse('ID artist tidak valid atau tidak ditemukan.', 400);
     }
-    console.error(`Artist error for id ${id}:`, error?.message || error);
-    return NextResponse.json({ error: String(error) }, { status: 500 });
+    console.error(`Artist error for id ${cleanId}:`, error?.message || error);
+    return createErrorResponse(
+      error?.message || 'Gagal memuat profil artis.',
+      500,
+      { artistId: cleanId }
+    );
   }
 }

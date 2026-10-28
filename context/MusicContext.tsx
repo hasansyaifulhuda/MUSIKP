@@ -98,6 +98,16 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const stallRecoveryCountRef = useRef<number>(0);
   const bufferingWatchdogRef = useRef<NodeJS.Timeout | null>(null);
   const audioContextRef = useRef<AudioContext | null>(null);
+  const fallbackAudioRef = useRef<HTMLAudioElement | null>(null);
+  const isFallbackActiveRef = useRef<boolean>(false);
+  const [isFallbackActive, setIsFallbackActive] = useState<boolean>(false);
+  const lastProgressRef = useRef<number>(-1);
+  const lastMediaSessionUpdateRef = useRef<number>(0);
+
+  const setFallbackActive = useCallback((active: boolean) => {
+    isFallbackActiveRef.current = active;
+    setIsFallbackActive(active);
+  }, []);
 
   const [isMounted, setIsMounted] = useState<boolean>(false);
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -182,6 +192,48 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         navigator.mediaSession.playbackState = 'playing';
       }
 
+      // Reset any active fallback audio element
+      if (fallbackAudioRef.current) {
+        try {
+          fallbackAudioRef.current.pause();
+          fallbackAudioRef.current.src = '';
+        } catch {}
+      }
+      setFallbackActive(false);
+
+      // If track is from iTunes fallback (e.g. itunes:12345), resolve real YouTube ID asynchronously
+      if (targetVideoId.startsWith('itunes:')) {
+        fetch(`/api/stream?id=${encodeURIComponent(targetVideoId)}&json=true`)
+          .then((res) => (res.ok ? res.json() : null))
+          .then((data) => {
+            if (data?.success && data.videoId && !data.videoId.startsWith('itunes:')) {
+              const updatedTrack = {
+                ...track,
+                videoId: data.videoId,
+                youtubeId: data.videoId,
+              };
+              const player = playerRef.current;
+              if (player && isPlayerReadyRef.current) {
+                loadedTrackIdRef.current = data.videoId;
+                try {
+                  player.loadVideoById(data.videoId);
+                  player.playVideo();
+                } catch {}
+              }
+              playTrackStore(updatedTrack, queue, context, forceIndex);
+            } else if (data?.streamUrl && fallbackAudioRef.current) {
+              setFallbackActive(true);
+              fallbackAudioRef.current.src = data.streamUrl;
+              fallbackAudioRef.current.play().catch(() => {});
+              playTrackStore(track, queue, context, forceIndex);
+            }
+          })
+          .catch((e) => {
+            console.warn('[MusicContext] iTunes to YouTube resolution error:', e);
+          });
+        return;
+      }
+
       // Direct Client-Side YouTube Control: Load ID directly into react-youtube instance
       const player = playerRef.current;
       if (player && isPlayerReadyRef.current) {
@@ -207,10 +259,38 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       setPlayingStore(true);
       setIsBuffering(true);
 
+      if (fallbackAudioRef.current) {
+        try {
+          fallbackAudioRef.current.pause();
+          fallbackAudioRef.current.src = '';
+        } catch {}
+      }
+      setFallbackActive(false);
+
       const targetTrack = usePlayerStore.getState().queue[index];
       if (targetTrack) {
         const targetVid = extractVideoId(targetTrack);
-        if (targetVid && playerRef.current && isPlayerReadyRef.current) {
+        if (targetVid?.startsWith('itunes:')) {
+          fetch(`/api/stream?id=${encodeURIComponent(targetVid)}&json=true`)
+            .then((res) => (res.ok ? res.json() : null))
+            .then((data) => {
+              if (data?.success && data.videoId && !data.videoId.startsWith('itunes:')) {
+                const player = playerRef.current;
+                if (player && isPlayerReadyRef.current) {
+                  loadedTrackIdRef.current = data.videoId;
+                  try {
+                    player.loadVideoById(data.videoId);
+                    player.playVideo();
+                  } catch {}
+                }
+              } else if (data?.streamUrl && fallbackAudioRef.current) {
+                setFallbackActive(true);
+                fallbackAudioRef.current.src = data.streamUrl;
+                fallbackAudioRef.current.play().catch(() => {});
+              }
+            })
+            .catch(() => {});
+        } else if (targetVid && playerRef.current && isPlayerReadyRef.current) {
           try {
             loadedTrackIdRef.current = targetVid;
             isSeekingLockRef.current = false;
@@ -231,6 +311,14 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const currentStore = usePlayerStore.getState();
     const nextPlaying = !currentStore.isPlaying;
     setPlayingStore(nextPlaying);
+
+    if (isFallbackActiveRef.current && fallbackAudioRef.current) {
+      if (nextPlaying) {
+        fallbackAudioRef.current.play().catch(() => {});
+      } else {
+        fallbackAudioRef.current.pause();
+      }
+    }
 
     const player = playerRef.current;
     if (player && isPlayerReadyRef.current) {
@@ -254,6 +342,14 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     (playing: boolean) => {
       initAudioContextKeepAlive();
       setPlayingStore(playing);
+
+      if (isFallbackActiveRef.current && fallbackAudioRef.current) {
+        if (playing) {
+          fallbackAudioRef.current.play().catch(() => {});
+        } else {
+          fallbackAudioRef.current.pause();
+        }
+      }
 
       const player = playerRef.current;
       if (player && isPlayerReadyRef.current) {
@@ -285,6 +381,13 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       isSeekingLockRef.current = true;
       setProgress(clamped);
 
+      if (isFallbackActiveRef.current && fallbackAudioRef.current) {
+        fallbackAudioRef.current.currentTime = clamped;
+        if (usePlayerStore.getState().isPlaying) {
+          fallbackAudioRef.current.play().catch(() => {});
+        }
+      }
+
       if (player && isPlayerReadyRef.current) {
         try {
           player.seekTo(clamped, true);
@@ -308,6 +411,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const toggleMute = useCallback(() => {
     setIsMuted((prev) => {
       const next = !prev;
+      if (fallbackAudioRef.current) {
+        fallbackAudioRef.current.muted = next;
+      }
       const player = playerRef.current;
       if (player && isPlayerReadyRef.current) {
         try {
@@ -330,6 +436,10 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
       setPrevVolume(vol);
       setVolumeStore(vol);
+
+      if (fallbackAudioRef.current) {
+        fallbackAudioRef.current.volume = Math.max(0, Math.min(1, vol / 100));
+      }
 
       const player = playerRef.current;
       if (player && isPlayerReadyRef.current) {
@@ -405,6 +515,25 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       consecutiveFailuresRef.current++;
 
       if (code === 101 || code === 150) {
+        // Embed playback disabled by YouTube / content owner
+        // Seamlessly switch to backend yt-dlp audio stream without dropping playback
+        const curVid = loadedTrackIdRef.current || extractVideoId(usePlayerStore.getState().currentTrack);
+        if (curVid && fallbackAudioRef.current) {
+          toast.info('Lagu dibatasi oleh YouTube, memutar via audio stream backend...');
+          setFallbackActive(true);
+          fallbackAudioRef.current.src = `/api/stream?id=${encodeURIComponent(curVid)}`;
+          fallbackAudioRef.current.load();
+          fallbackAudioRef.current
+            .play()
+            .then(() => {
+              consecutiveFailuresRef.current = 0;
+            })
+            .catch((err) => {
+              console.warn('[MusicContext] Fallback audio playback failed:', err);
+              playNext();
+            });
+          return;
+        }
         toast.info('Lagu ini dibatasi oleh YouTube untuk pemutar sematan, memutar lagu berikutnya...');
       } else if (code === 100) {
         toast.info('Lagu tidak ditemukan atau telah dihapus, memutar lagu berikutnya...');
@@ -437,6 +566,14 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (loadedTrackIdRef.current === currentVideoId) {
       return;
     }
+
+    if (fallbackAudioRef.current) {
+      try {
+        fallbackAudioRef.current.pause();
+        fallbackAudioRef.current.src = '';
+      } catch {}
+    }
+    setFallbackActive(false);
 
     loadedTrackIdRef.current = currentVideoId;
     isSeekingLockRef.current = false;
@@ -493,6 +630,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // =========================================================================
   // 6. High-Precision Progress & Duration Polling (250ms)
   // =========================================================================
+  // 6. Audio Progress Polling & Synchronization (Throttled for High Performance)
+  // =========================================================================
   useEffect(() => {
     if (!isPlaying) return;
 
@@ -503,48 +642,57 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       try {
         if (typeof player.getCurrentTime === 'function') {
           const curRes = player.getCurrentTime();
-          if (curRes && typeof curRes.then === 'function') {
-            curRes
-              .then((cur: number) => {
-                if (typeof cur === 'number' && !isNaN(cur) && !isSeekingLockRef.current) {
-                  setProgress(cur);
+          const handleCurTime = (cur: number) => {
+            if (typeof cur === 'number' && !isNaN(cur) && !isSeekingLockRef.current) {
+              // Throttle: only update state if delta >= 0.25s or when starting/resuming
+              if (Math.abs(cur - lastProgressRef.current) >= 0.25 || lastProgressRef.current < 0) {
+                lastProgressRef.current = cur;
+                setProgress(cur);
+              }
 
-                  const dur = usePlayerStore.getState().duration;
-                  if (
-                    typeof navigator !== 'undefined' &&
-                    'mediaSession' in navigator &&
-                    'setPositionState' in navigator.mediaSession &&
-                    dur &&
-                    dur > 0
-                  ) {
-                    try {
-                      navigator.mediaSession.setPositionState({
-                        duration: dur,
-                        playbackRate: 1,
-                        position: Math.min(dur, cur),
-                      });
-                    } catch {}
-                  }
+              // Throttle MediaSession position updates to once every 1.5 seconds to eliminate IPC lag
+              const now = Date.now();
+              if (now - lastMediaSessionUpdateRef.current >= 1500) {
+                lastMediaSessionUpdateRef.current = now;
+                const dur = usePlayerStore.getState().duration;
+                if (
+                  typeof navigator !== 'undefined' &&
+                  'mediaSession' in navigator &&
+                  'setPositionState' in navigator.mediaSession &&
+                  dur &&
+                  dur > 0
+                ) {
+                  try {
+                    navigator.mediaSession.setPositionState({
+                      duration: dur,
+                      playbackRate: 1,
+                      position: Math.min(dur, cur),
+                    });
+                  } catch {}
                 }
-              })
-              .catch(() => {});
-          } else if (typeof curRes === 'number' && !isNaN(curRes) && !isSeekingLockRef.current) {
-            setProgress(curRes);
+              }
+            }
+          };
+
+          if (curRes && typeof curRes.then === 'function') {
+            curRes.then(handleCurTime).catch(() => {});
+          } else if (typeof curRes === 'number') {
+            handleCurTime(curRes);
           }
         }
 
         if (typeof player.getDuration === 'function') {
           const durRes = player.getDuration();
+          const handleDur = (dur: number) => {
+            if (typeof dur === 'number' && dur > 0 && Math.abs(dur - usePlayerStore.getState().duration) > 0.5) {
+              setDuration(dur);
+            }
+          };
+
           if (durRes && typeof durRes.then === 'function') {
-            durRes
-              .then((dur: number) => {
-                if (typeof dur === 'number' && dur > 0 && dur !== usePlayerStore.getState().duration) {
-                  setDuration(dur);
-                }
-              })
-              .catch(() => {});
-          } else if (typeof durRes === 'number' && durRes > 0 && durRes !== usePlayerStore.getState().duration) {
-            setDuration(durRes);
+            durRes.then(handleDur).catch(() => {});
+          } else if (typeof durRes === 'number') {
+            handleDur(durRes);
           }
         }
       } catch {}
@@ -685,7 +833,11 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     return [];
   });
 
-  const likedIds = useMemo(() => new Set(likedSongs.map((t) => t.videoId)), [likedSongs]);
+  const likedIdsRef = useRef<Set<string>>(new Set());
+
+  useEffect(() => {
+    likedIdsRef.current = new Set(likedSongs.map((t) => t.videoId));
+  }, [likedSongs]);
 
   useEffect(() => {
     let active = true;
@@ -707,12 +859,14 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  const isLiked = useCallback((videoId: string) => likedIds.has(videoId), [likedIds]);
+  const isLiked = useCallback((videoId: string) => {
+    return likedIdsRef.current.has(videoId);
+  }, []);
 
   const toggleLike = useCallback(
     async (track: Track): Promise<boolean> => {
       if (!track?.videoId) return false;
-      const alreadyLiked = likedIds.has(track.videoId);
+      const alreadyLiked = likedIdsRef.current.has(track.videoId);
 
       setLikedSongs((prev) => {
         const next = alreadyLiked
@@ -736,7 +890,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
       return !alreadyLiked;
     },
-    [likedIds]
+    []
   );
 
   // =========================================================================
@@ -773,7 +927,6 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         playsinline: 1,
         enablejsapi: 1,
         iv_load_policy: 3,
-        origin: typeof window !== 'undefined' && window.location.origin ? window.location.origin : undefined,
       },
     }),
     []
@@ -957,6 +1110,59 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           />
         )}
       </div>
+      <audio
+        ref={fallbackAudioRef}
+        className="hidden"
+        preload="metadata"
+        onTimeUpdate={() => {
+          if (isFallbackActive && fallbackAudioRef.current && !isSeekingLockRef.current) {
+            const cur = fallbackAudioRef.current.currentTime;
+            if (Math.abs(cur - lastProgressRef.current) >= 0.25 || lastProgressRef.current < 0) {
+              lastProgressRef.current = cur;
+              setProgress(cur);
+            }
+          }
+        }}
+        onDurationChange={() => {
+          if (isFallbackActive && fallbackAudioRef.current && fallbackAudioRef.current.duration) {
+            setDuration(fallbackAudioRef.current.duration);
+          }
+        }}
+        onPlay={() => {
+          if (isFallbackActive) {
+            setPlayingStore(true);
+            setIsBuffering(false);
+          }
+        }}
+        onPause={() => {
+          if (isFallbackActive) {
+            setPlayingStore(false);
+          }
+        }}
+        onWaiting={() => {
+          if (isFallbackActive) {
+            setIsBuffering(true);
+          }
+        }}
+        onPlaying={() => {
+          if (isFallbackActive) {
+            setIsBuffering(false);
+          }
+        }}
+        onEnded={() => {
+          if (isFallbackActive) {
+            setIsBuffering(false);
+            handlePlayerEndedRef.current();
+          }
+        }}
+        onError={() => {
+          if (isFallbackActive) {
+            console.warn('[MusicContext] Audio stream fallback element error, skipping to next track...');
+            setIsFallbackActive(false);
+            playNext();
+          }
+        }}
+      />
       {children}
     </MusicContext.Provider>
   );

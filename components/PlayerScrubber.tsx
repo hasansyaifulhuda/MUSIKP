@@ -3,6 +3,7 @@
 import React, { memo, useState, useCallback, useEffect, useRef } from 'react';
 import { usePlayerStore } from '@/lib/store';
 import { formatTimeDisplay } from '@/lib/performance';
+import { LyricsView } from './LyricsView';
 
 interface ScrubberProps {
   onSeekCommit?: (time: number) => void;
@@ -338,7 +339,7 @@ export const LyricsViewContainer = memo(function LyricsViewContainer({
 
   return (
     <div className="flex-1 min-h-0 flex flex-col w-full">
-      <LyricsViewWithTime
+      <LyricsView
         lyrics={lyrics}
         currentTime={currentTime}
         onSeek={onSeek}
@@ -348,18 +349,4 @@ export const LyricsViewContainer = memo(function LyricsViewContainer({
     </div>
   );
 });
-
-import dynamic from 'next/dynamic';
-
-const LyricsViewWithTime = dynamic(
-  () => import('./LyricsView').then((m) => m.LyricsView),
-  {
-    ssr: false,
-    loading: () => (
-      <div className="flex-1 flex items-center justify-center text-white/50 animate-pulse text-sm">
-        Memuat lirik...
-      </div>
-    ),
-  }
-);
 

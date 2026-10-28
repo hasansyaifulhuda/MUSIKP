@@ -27,7 +27,8 @@ export default function AlbumPage() {
         setError(false);
         const res = await fetch(`/api/album?id=${encodeURIComponent(albumId)}`);
         if (!res.ok) throw new Error('Album not found');
-        const data = await res.json();
+        const raw = await res.json();
+        const data = raw?.result !== undefined ? raw.result : raw;
         if (active) {
           setAlbum(data);
         }

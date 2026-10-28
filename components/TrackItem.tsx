@@ -1,6 +1,6 @@
 'use client';
 
-import React, { memo, useCallback } from 'react';
+import React, { memo, useCallback, useMemo } from 'react';
 import { Track, usePlayerStore } from '@/lib/store';
 import { MoreHorizontal, Trash2, Play } from 'lucide-react';
 import Image from 'next/image';
@@ -12,6 +12,13 @@ interface TrackItemProps {
   queue?: Track[];
   index?: number;
   onRemove?: (track: Track) => void;
+}
+
+function formatTrackDuration(seconds?: number): string {
+  if (!seconds) return '';
+  const m = Math.floor(seconds / 60);
+  const s = Math.floor(seconds % 60);
+  return `${m}:${s < 10 ? '0' : ''}${s}`;
 }
 
 export const TrackItem = memo(function TrackItem({
@@ -28,17 +35,17 @@ export const TrackItem = memo(function TrackItem({
   );
   const setTrackToAdd = usePlayerStore((state) => state.setTrackToAdd);
 
-  const thumbnail = getHighResImage(track.thumbnails?.[track.thumbnails.length - 1]?.url, 120);
-  const artistName = Array.isArray(track.artist)
-    ? track.artist.map((a) => a.name).join(', ')
-    : track.artist?.name || 'Unknown Artist';
+  const thumbnail = useMemo(
+    () => getHighResImage(track.thumbnails?.[track.thumbnails.length - 1]?.url, 120),
+    [track.thumbnails]
+  );
 
-  const formatDuration = useCallback((seconds?: number) => {
-    if (!seconds) return '';
-    const m = Math.floor(seconds / 60);
-    const s = Math.floor(seconds % 60);
-    return `${m}:${s < 10 ? '0' : ''}${s}`;
-  }, []);
+  const artistName = useMemo(() => {
+    if (Array.isArray(track.artist)) {
+      return track.artist.map((a: any) => (typeof a === 'string' ? a : a.name)).join(', ');
+    }
+    return (track.artist as any)?.name || 'Unknown Artist';
+  }, [track.artist]);
 
   const handleClick = useCallback(() => {
     playTrack(track, queue, 'playlist', index);
@@ -115,7 +122,7 @@ export const TrackItem = memo(function TrackItem({
       {/* Duration */}
       {track.duration && (
         <span className="hidden sm:block text-xs text-[#b3b3b3] font-mono tabular-nums pr-2">
-          {formatDuration(track.duration)}
+          {formatTrackDuration(track.duration)}
         </span>
       )}
 
