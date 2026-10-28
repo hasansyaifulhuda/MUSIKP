@@ -22,6 +22,11 @@ const ConsoleFilter = dynamic(
   { ssr: false }
 );
 
+const OfflineIndicator = dynamic(
+  () => import('@/components/OfflineIndicator').then((mod) => mod.OfflineIndicator),
+  { ssr: false }
+);
+
 export function ClientModals() {
   return (
     <>
@@ -29,6 +34,7 @@ export function ClientModals() {
       <AddToPlaylistModal />
       <ToastContainer />
       <PWARegister />
+      <OfflineIndicator />
     </>
   );
 }

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { ArrowLeft, DownloadCloud, Play, Trash2, CheckCircle2, Music } from 'lucide-react';
@@ -18,21 +18,30 @@ export default function DownloadPage() {
 
   const { playTrack, currentTrack, isPlaying } = useMusic();
 
-  const loadOfflineTracks = async () => {
+  const loadOfflineTracks = useCallback(async () => {
     try {
       setLoading(true);
       const data = await db.getOfflineTracks();
-      setOfflineTracks(data.reverse());
+      setOfflineTracks([...data].reverse());
     } catch (err) {
       console.error('Failed to load offline tracks:', err);
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
 
   useEffect(() => {
     loadOfflineTracks();
-  }, []);
+
+    const handleFocusSync = () => {
+      db.getOfflineTracks()
+        .then((data) => setOfflineTracks([...data].reverse()))
+        .catch(() => {});
+    };
+
+    window.addEventListener('focus', handleFocusSync);
+    return () => window.removeEventListener('focus', handleFocusSync);
+  }, [loadOfflineTracks]);
 
   const handlePlayAll = () => {
     if (offlineTracks.length === 0) return;
@@ -89,14 +98,11 @@ export default function DownloadPage() {
             <ArrowLeft className="w-6 h-6" />
           </button>
           <div>
-            <h1 className="text-xl md:text-2xl font-extrabold text-white tracking-tight flex items-center gap-2.5">
-              <span>Download</span>
-              <span className="text-xs font-bold px-2 py-0.5 rounded-full bg-[#1DB954]/20 text-[#1DB954] border border-[#1DB954]/30">
-                Offline Mode
-              </span>
+            <h1 className="text-xl md:text-2xl font-extrabold text-white tracking-tight">
+              Download
             </h1>
-            <p className="text-xs text-[#b3b3b3] hidden sm:block">
-              {offlineTracks.length} lagu tersimpan di penyimpanan IndexedDB lokal
+            <p className="text-xs text-[#b3b3b3] mt-0.5">
+              {offlineTracks.length} lagu tersimpan di memori perangkat
             </p>
           </div>
         </div>
@@ -130,20 +136,8 @@ export default function DownloadPage() {
             ))}
           </div>
         ) : offlineTracks.length === 0 ? (
-          <div className="min-h-[55vh] flex flex-col items-center justify-center text-center p-6">
-            <div className="w-20 h-20 rounded-full bg-white/5 border border-white/10 flex items-center justify-center mb-5 text-[#b3b3b3]">
-              <DownloadCloud className="w-10 h-10 stroke-[1.5]" />
-            </div>
-            <h2 className="text-xl font-bold text-white mb-2">Belum Ada Lagu yang Diunduh</h2>
-            <p className="text-sm text-[#b3b3b3] max-w-sm mb-6 leading-relaxed">
-              Unduh lagu favorit Anda dengan mengetuk tombol Download pada pemutar untuk mendengarkannya secara offline tanpa kuota internet.
-            </p>
-            <button
-              onClick={() => router.push('/')}
-              className="px-6 py-3 bg-[#1DB954] hover:bg-[#1ed760] text-black font-bold text-sm rounded-full hover:scale-105 active:scale-95 transition-all shadow-lg cursor-pointer"
-            >
-              Jelajahi Musik
-            </button>
+          <div className="py-24 text-center text-xs text-white/40">
+            Belum ada lagu yang diunduh. Lagu yang disimpan saat online akan muncul di sini.
           </div>
         ) : (
           <div className="space-y-1">

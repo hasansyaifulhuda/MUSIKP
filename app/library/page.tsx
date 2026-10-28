@@ -1,6 +1,6 @@
 'use client';
 
-import { Suspense, useState, useEffect, useCallback, useMemo } from 'react';
+import { Suspense, useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { db, SubscribedArtist, SavedAlbum, OfflineTrack } from '@/lib/db';
 import { Track, usePlayerStore } from '@/lib/store';
@@ -20,11 +20,14 @@ import {
 } from 'lucide-react';
 import Image from 'next/image';
 import { toast } from '@/lib/toast';
+import { useOnlineStatus } from '@/hooks/useOnlineStatus';
 
 function LibraryContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const tabParam = searchParams.get('tab');
+  const isOnline = useOnlineStatus();
+  const initialOfflineTabCheckedRef = useRef(false);
 
   const [likedSongs, setLikedSongs] = useState<Track[]>([]);
   const [playlists, setPlaylists] = useState<any[]>([]);
@@ -39,6 +42,14 @@ function LibraryContent() {
   const playTrack = usePlayerStore((state) => state.playTrack);
 
   const tabs = ['Semua', 'Daftar putar', 'Lagu Disukai', 'Album', 'Artis', 'Diunduh'];
+
+  // Automatically default to 'Diunduh' once on initial load when offline if no specific tab is selected
+  useEffect(() => {
+    if (!initialOfflineTabCheckedRef.current && !isOnline && !tabParam) {
+      initialOfflineTabCheckedRef.current = true;
+      setActiveTab('Diunduh');
+    }
+  }, [isOnline, tabParam]);
 
   // Sync tab with URL search query param if present
   useEffect(() => {

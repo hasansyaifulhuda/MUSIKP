@@ -11,7 +11,8 @@ import React, {
 } from 'react';
 import { usePlayerStore, Track, extractVideoId } from '@/lib/store';
 import { useHotkeys } from '@/hooks/useHotkeys';
-import { db } from '@/lib/db';
+import { useOnlineStatus } from '@/hooks/useOnlineStatus';
+import { db, OfflineTrack } from '@/lib/db';
 import { toast } from '@/lib/toast';
 import { getHighResImage } from '@/lib/utils';
 
@@ -29,6 +30,7 @@ export interface MusicContextType {
   repeatMode: 'off' | 'all' | 'one';
   isShuffle: boolean;
   dominantColor: string | null;
+  isOnline: boolean;
 
   // Persistent Liked Songs
   likedSongs: Track[];
@@ -67,6 +69,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const isShuffle = usePlayerStore((state) => state.isShuffle);
   const dominantColor = usePlayerStore((state) => state.dominantColor);
 
+  // Network Online/Offline reactive status
+  const isOnline = useOnlineStatus();
+
   // Store actions
   const playTrackStore = usePlayerStore((state) => state.playTrack);
   const setPlayingStore = usePlayerStore((state) => state.setPlaying);
@@ -81,6 +86,30 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const toggleRepeat = usePlayerStore((state) => state.toggleRepeat);
   const addToQueue = usePlayerStore((state) => state.addToQueue);
   const clearQueue = usePlayerStore((state) => state.clearQueue);
+
+  // Network state change handler: prevent hanging spinners or orphaned buffers
+  useEffect(() => {
+    const handleOnline = () => {
+      setIsBuffering(false);
+    };
+
+    const handleOffline = () => {
+      // If currently buffering an online network stream when connection drops,
+      // release loading spinner immediately so UI never hangs!
+      const audio = getPersistentAudioElement();
+      if (audio && !audio.src.startsWith('blob:')) {
+        setIsBuffering(false);
+      }
+    };
+
+    window.addEventListener('online', handleOnline);
+    window.addEventListener('offline', handleOffline);
+
+    return () => {
+      window.removeEventListener('online', handleOnline);
+      window.removeEventListener('offline', handleOffline);
+    };
+  }, [setIsBuffering]);
 
   // Local State & Audio Control Refs
   const [isMuted, setIsMuted] = useState<boolean>(false);
@@ -345,6 +374,25 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
       lastErrorTimestampRef.current = now;
 
+      const isDeviceOffline = typeof navigator !== 'undefined' && !navigator.onLine;
+      const isBlobSrc = audio.src.startsWith('blob:');
+
+      // STRICT OFFLINE & LOCAL BLOB GUARD:
+      // If offline or if the error occurred on an IndexedDB blob, NEVER retry with /api/stream!
+      if (isDeviceOffline || isBlobSrc) {
+        try {
+          audio.pause();
+        } catch {}
+        setPlayingStore(false);
+        setIsBuffering(false);
+        if (isDeviceOffline && !isBlobSrc) {
+          toast.info('Mode offline: Hubungkan ke internet untuk memutar lagu online.');
+        } else if (isBlobSrc) {
+          toast.error('File audio offline tidak dapat diputar.');
+        }
+        return;
+      }
+
       const retries = retryCountPerTrackRef.current.get(trackId) || 0;
 
       // Retry Limit: Allow at most 1 single retry attempt per track
@@ -453,58 +501,110 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const loadAndPlayTrack = useCallback(
     async (targetVid: string, autoPlay: boolean = true) => {
       const audio = getPersistentAudioElement();
-      if (!audio) return;
+      if (!audio || !targetVid) return;
 
-      loadedTrackIdRef.current = targetVid;
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
       }
-      cleanupActiveBlobUrl();
 
-      // Only set buffering if autoPlay is explicitly requested by user action
+      // Guard: if audio element is already loaded with this videoId, don't interrupt or recreate
+      const isAudioAlreadyLoaded = Boolean(
+        audio.src &&
+        audio.src !== '' &&
+        audio.src !== window.location.href &&
+        (
+          (activeBlobUrlRef.current && audio.src === activeBlobUrlRef.current) ||
+          audio.src.includes(encodeURIComponent(targetVid))
+        )
+      );
+
+      if (loadedTrackIdRef.current === targetVid && isAudioAlreadyLoaded) {
+        if (autoPlay && audio.paused) {
+          audio.play().catch(() => {});
+        }
+        setIsBuffering(false);
+        return;
+      }
+
+      loadedTrackIdRef.current = targetVid;
+
       if (autoPlay) {
         setIsBuffering(true);
       }
 
       // 1. OFFLINE INDEXEDDB CHECK FIRST:
       // If track was saved locally in IndexedDB, play directly from the local Blob!
-      // This guarantees 100% offline playback without any network request.
+      let offlineItem: OfflineTrack | undefined;
       try {
-        const offlineItem = await db.getOfflineTrack(targetVid);
-        if (offlineItem?.blob && offlineItem.blob instanceof Blob && offlineItem.blob.size > 0) {
-          if (loadedTrackIdRef.current !== targetVid) return;
-
-          const blobUrl = URL.createObjectURL(offlineItem.blob);
-          activeBlobUrlRef.current = blobUrl;
-          audio.src = blobUrl;
-          audio.currentTime = 0;
-          audio.volume = Math.max(0, Math.min(1, volume / 100));
-          audio.muted = isMuted;
-          audio.load();
-
-          if (autoPlay) {
-            const playPromise = audio.play();
-            if (playPromise !== undefined) {
-              playPromise.catch(() => {});
-            }
-          }
-          setIsBuffering(false);
-          return;
-        }
+        offlineItem = await db.getOfflineTrack(targetVid);
       } catch (err) {
         console.warn('[OfflinePlay] Error reading offline track from IndexedDB:', err);
       }
 
-      // 2. ONLINE STREAM FALLBACK:
-      // If not stored offline in IndexedDB, fetch from server stream endpoint
-      const streamUrl = `/api/stream?id=${encodeURIComponent(targetVid)}`;
-      const isSameSrc = audio.src === streamUrl || audio.src.endsWith(encodeURIComponent(targetVid));
+      // Guard: abort if user picked another track while waiting for IndexedDB
+      if (loadedTrackIdRef.current !== targetVid) {
+        return;
+      }
 
-      // ONLY set audio.src and load audio if autoPlay is true!
-      // If autoPlay is false (e.g. restored from localStorage in paused state),
-      // we leave audio.src idle until user explicitly presses Play!
-      if (autoPlay && !isSameSrc) {
+      let audioBlob: Blob | null = null;
+      if (offlineItem?.blob instanceof Blob) {
+        audioBlob = offlineItem.blob;
+      } else if (offlineItem?.blob && (offlineItem.blob as any).buffer) {
+        audioBlob = new Blob([(offlineItem.blob as any).buffer], { type: 'audio/mpeg' });
+      } else if (offlineItem?.blob && typeof (offlineItem.blob as any).slice === 'function') {
+        audioBlob = offlineItem.blob as Blob;
+      }
+
+      if (audioBlob && audioBlob.size > 0) {
+        cleanupActiveBlobUrl();
+        const blobUrl = URL.createObjectURL(audioBlob);
+        activeBlobUrlRef.current = blobUrl;
+        audio.src = blobUrl;
+        audio.currentTime = 0;
+        audio.volume = Math.max(0, Math.min(1, volume / 100));
+        audio.muted = isMuted;
+        audio.load();
+
+        if (autoPlay) {
+          const playPromise = audio.play();
+          if (playPromise !== undefined) {
+            playPromise.catch((err) => {
+              if (err?.name === 'NotAllowedError') {
+                setPlayingStore(false);
+                setIsBuffering(false);
+              }
+            });
+          }
+        }
+        setIsBuffering(false);
+        return;
+      }
+
+      // 2. STRICT OFFLINE GUARD:
+      // Only block network streaming if the device is strictly and genuinely offline (navigator.onLine === false)!
+      const isStrictlyOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
+      if (isStrictlyOffline) {
+        cleanupActiveBlobUrl();
+        try {
+          audio.pause();
+          audio.removeAttribute('src');
+          audio.load();
+        } catch {}
+        setIsBuffering(false);
+        setPlayingStore(false);
+        if (autoPlay) {
+          toast.info('Lagu ini belum diunduh untuk pemutaran offline.');
+        }
+        return;
+      }
+
+      // 3. ONLINE STREAM FALLBACK:
+      cleanupActiveBlobUrl();
+      const streamUrl = `/api/stream?id=${encodeURIComponent(targetVid)}`;
+      const isSameSrc = Boolean(audio.src && audio.src.includes(encodeURIComponent(targetVid)));
+
+      if (!isSameSrc) {
         audio.src = streamUrl;
         audio.currentTime = 0;
         audio.volume = Math.max(0, Math.min(1, volume / 100));
@@ -518,7 +618,6 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           if (playPromise !== undefined) {
             playPromise.catch((err) => {
               if (err?.name === 'NotAllowedError') {
-                // Browser policy deferred autoplay until next user gesture
                 setPlayingStore(false);
                 setIsBuffering(false);
               }
@@ -596,15 +695,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    const audio = getPersistentAudioElement();
-    const isPlayingStore = usePlayerStore.getState().isPlaying;
-
-    if (loadedTrackIdRef.current === currentVideoId && audio && (!audio.paused || !isPlayingStore)) {
+    // If loadedTrackIdRef already matches the active track, do NOT re-execute to prevent race conditions
+    if (loadedTrackIdRef.current === currentVideoId) {
       return;
     }
 
-    // When the track is restored from localStorage or loaded initially in paused/ready state:
-    // DO NOT invoke stream fetch or buffering. Keep the player ready/paused until user explicitly plays.
+    const isPlayingStore = usePlayerStore.getState().isPlaying;
     if (!isPlayingStore) {
       loadedTrackIdRef.current = currentVideoId;
       setIsBuffering(false);
@@ -629,33 +725,20 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       if (nextPlaying) {
         const vid = currentStore.currentTrack ? extractVideoId(currentStore.currentTrack) : '';
         if (vid) {
-          const isAlreadyPlayingSame =
+          const isAudioReady = Boolean(
             audio.src &&
-            (audio.src.startsWith('blob:') ||
-              audio.src.endsWith(encodeURIComponent(vid)) ||
-              audio.src.includes(encodeURIComponent(vid)));
+            audio.src !== '' &&
+            audio.src !== window.location.href &&
+            (
+              (activeBlobUrlRef.current && audio.src === activeBlobUrlRef.current) ||
+              audio.src.includes(encodeURIComponent(vid))
+            )
+          );
 
-          if (!isAlreadyPlayingSame) {
+          if (!isAudioReady) {
             setIsBuffering(true);
-            const offlineItem = await db.getOfflineTrack(vid).catch(() => undefined);
-            if (offlineItem?.blob && offlineItem.blob instanceof Blob && offlineItem.blob.size > 0) {
-              cleanupActiveBlobUrl();
-              const blobUrl = URL.createObjectURL(offlineItem.blob);
-              activeBlobUrlRef.current = blobUrl;
-              audio.src = blobUrl;
-              audio.currentTime = 0;
-              audio.volume = Math.max(0, Math.min(1, volume / 100));
-              audio.muted = isMuted;
-              audio.load();
-              setIsBuffering(false);
-            } else {
-              const streamUrl = `/api/stream?id=${encodeURIComponent(vid)}`;
-              audio.src = streamUrl;
-              audio.currentTime = 0;
-              audio.volume = Math.max(0, Math.min(1, volume / 100));
-              audio.muted = isMuted;
-              audio.load();
-            }
+            await loadAndPlayTrack(vid, true);
+            return;
           }
         }
         audio.play().catch((err) => {
@@ -672,7 +755,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = nextPlaying ? 'playing' : 'paused';
     }
-  }, [setPlayingStore, setIsBuffering, initAudioContextKeepAlive, volume, isMuted, cleanupActiveBlobUrl]);
+  }, [setPlayingStore, setIsBuffering, initAudioContextKeepAlive, loadAndPlayTrack]);
 
   const setPlaying = useCallback(
     async (playing: boolean) => {
@@ -688,33 +771,20 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           const currentTrack = usePlayerStore.getState().currentTrack;
           const vid = currentTrack ? extractVideoId(currentTrack) : '';
           if (vid) {
-            const isAlreadyPlayingSame =
+            const isAudioReady = Boolean(
               audio.src &&
-              (audio.src.startsWith('blob:') ||
-                audio.src.endsWith(encodeURIComponent(vid)) ||
-                audio.src.includes(encodeURIComponent(vid)));
+              audio.src !== '' &&
+              audio.src !== window.location.href &&
+              (
+                (activeBlobUrlRef.current && audio.src === activeBlobUrlRef.current) ||
+                audio.src.includes(encodeURIComponent(vid))
+              )
+            );
 
-            if (!isAlreadyPlayingSame) {
+            if (!isAudioReady) {
               setIsBuffering(true);
-              const offlineItem = await db.getOfflineTrack(vid).catch(() => undefined);
-              if (offlineItem?.blob && offlineItem.blob instanceof Blob && offlineItem.blob.size > 0) {
-                cleanupActiveBlobUrl();
-                const blobUrl = URL.createObjectURL(offlineItem.blob);
-                activeBlobUrlRef.current = blobUrl;
-                audio.src = blobUrl;
-                audio.currentTime = 0;
-                audio.volume = Math.max(0, Math.min(1, volume / 100));
-                audio.muted = isMuted;
-                audio.load();
-                setIsBuffering(false);
-              } else {
-                const streamUrl = `/api/stream?id=${encodeURIComponent(vid)}`;
-                audio.src = streamUrl;
-                audio.currentTime = 0;
-                audio.volume = Math.max(0, Math.min(1, volume / 100));
-                audio.muted = isMuted;
-                audio.load();
-              }
+              await loadAndPlayTrack(vid, true);
+              return;
             }
           }
           audio.play().catch((err) => {
@@ -732,7 +802,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         navigator.mediaSession.playbackState = playing ? 'playing' : 'paused';
       }
     },
-    [setPlayingStore, setIsBuffering, initAudioContextKeepAlive, volume, isMuted, cleanupActiveBlobUrl]
+    [setPlayingStore, setIsBuffering, initAudioContextKeepAlive, loadAndPlayTrack]
   );
 
   const seekTo = useCallback(
@@ -1145,6 +1215,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       repeatMode,
       isShuffle,
       dominantColor,
+      isOnline,
       likedSongs,
       isLiked,
       toggleLike,
@@ -1173,6 +1244,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       repeatMode,
       isShuffle,
       dominantColor,
+      isOnline,
       likedSongs,
       isLiked,
       toggleLike,

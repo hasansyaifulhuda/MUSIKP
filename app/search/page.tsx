@@ -72,6 +72,26 @@ export default function Search() {
     const searches = await db.getRecentSearches();
     setRecentSearches(searches);
 
+    // If offline: search locally within downloaded IndexedDB tracks
+    if (typeof navigator !== 'undefined' && !navigator.onLine) {
+      try {
+        const offlineItems = await db.getOfflineTracks();
+        const q = searchQuery.toLowerCase();
+        const matched = offlineItems
+          .filter((it) => {
+            const name = it.track?.name?.toLowerCase() || '';
+            const artist = Array.isArray(it.track?.artist)
+              ? it.track.artist.map((a: any) => a.name).join(' ').toLowerCase()
+              : it.track?.artist?.name?.toLowerCase() || '';
+            return name.includes(q) || artist.includes(q);
+          })
+          .map((it) => it.track);
+        setResults(matched);
+      } catch {}
+      setLoading(false);
+      return;
+    }
+
     try {
       const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
       if (res.ok) {

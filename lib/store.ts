@@ -316,6 +316,9 @@ export const usePlayerStore = create<PlayerState>()(
           });
         } else {
           if (playContext === 'similar' && currentTrack && currentTrack.videoId) {
+            if (typeof navigator !== 'undefined' && !navigator.onLine) {
+              return;
+            }
             try {
               const controller = new AbortController();
               const timeoutId = setTimeout(() => controller.abort(), 4000);

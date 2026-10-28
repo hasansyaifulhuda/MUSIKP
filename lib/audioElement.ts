@@ -51,7 +51,7 @@ export function playTrackImmediately(targetVid: string, autoPlay: boolean = true
     }
 
     const streamUrl = `/api/stream?id=${encodeURIComponent(targetVid)}`;
-    const isSameSrc = audio.src === streamUrl || audio.src.endsWith(encodeURIComponent(targetVid));
+    const isSameSrc = Boolean(audio.src && audio.src.includes(encodeURIComponent(targetVid)));
 
     if (!isSameSrc) {
       audio.src = streamUrl;

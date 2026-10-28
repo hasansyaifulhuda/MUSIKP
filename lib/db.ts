@@ -755,3 +755,8 @@ export const db = {
     }
   },
 };
+
+// Eagerly populate synchronous in-memory offline track cache on client load
+if (typeof window !== 'undefined') {
+  db.initOfflineCache().catch(() => {});
+}
