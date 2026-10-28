@@ -1,5 +1,6 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
 import { Track } from './store';
+import { LyricLine, normalizeLyrics } from './performance';
 
 export interface SavedAlbum {
   albumId: string;
@@ -26,6 +27,9 @@ export interface OfflineTrack {
   track: Track;
   blob?: Blob;
   downloadedAt: number;
+  lyrics?: LyricLine[];
+  isSyncedLyrics?: boolean;
+  synced?: boolean;
 }
 
 interface SannMusicDB extends DBSchema {
@@ -544,7 +548,11 @@ export const db = {
     }
   },
 
-  async saveOfflineTrack(track: Track, blob?: Blob): Promise<OfflineTrack> {
+  async saveOfflineTrack(
+    track: Track,
+    blob?: Blob,
+    lyricsData?: { lyrics?: LyricLine[]; isSyncedLyrics?: boolean; synced?: boolean }
+  ): Promise<OfflineTrack> {
     if (typeof window === 'undefined' || !track?.videoId) {
       throw new Error('Track tidak valid atau IndexedDB tidak tersedia');
     }
@@ -623,11 +631,53 @@ export const db = {
       throw new Error('Data audio tidak valid: file audio harus berformat binary Blob utuh (>1KB).');
     }
 
+    // Extract or proactively fetch lyrics to bundle together with audio
+    let finalLyrics: LyricLine[] = [];
+    let finalSynced = false;
+
+    if (lyricsData && Array.isArray(lyricsData.lyrics) && lyricsData.lyrics.length > 0) {
+      finalLyrics = lyricsData.lyrics;
+      finalSynced = Boolean(lyricsData.isSyncedLyrics ?? lyricsData.synced);
+    } else if (typeof navigator !== 'undefined' && navigator.onLine) {
+      try {
+        const artistName = Array.isArray(track.artist)
+          ? track.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(' ')
+          : track.artist?.name || '';
+        const dur = Math.round(track.duration || 200);
+        const lyricsUrl = `/api/lyrics?id=${encodeURIComponent(track.videoId)}&title=${encodeURIComponent(
+          track.name || ''
+        )}&artist=${encodeURIComponent(artistName)}&duration=${dur}`;
+
+        const lyricsController = new AbortController();
+        const lyricsTimeout = setTimeout(() => {
+          try {
+            lyricsController.abort();
+          } catch {}
+        }, 6000);
+
+        const lyricsRes = await fetch(lyricsUrl, { signal: lyricsController.signal })
+          .then((r) => (r.ok ? r.json() : null))
+          .catch(() => null)
+          .finally(() => clearTimeout(lyricsTimeout));
+
+        const payload = lyricsRes?.result !== undefined ? lyricsRes.result : lyricsRes;
+        if (Array.isArray(payload?.lyrics) && payload.lyrics.length > 0) {
+          finalLyrics = normalizeLyrics(payload.lyrics, dur);
+          finalSynced = Boolean(payload.synced);
+        }
+      } catch (lyricsErr) {
+        console.warn(`[IDB] Non-fatal: Lyrics fetch for offline track ${track.videoId} failed:`, lyricsErr);
+      }
+    }
+
     const item: OfflineTrack = {
       videoId: track.videoId,
       track,
       blob: audioBlob,
       downloadedAt: Date.now(),
+      lyrics: finalLyrics,
+      isSyncedLyrics: finalSynced,
+      synced: finalSynced,
     };
 
     try {

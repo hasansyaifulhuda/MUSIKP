@@ -118,7 +118,7 @@ export function Player() {
     : currentTrack?.artist?.name || '';
   const currentTrackDuration = currentTrack?.duration;
 
-  // 2. Fetch Synchronized Lyrics (non-blocking, timeout-protected)
+  // 2. Fetch Synchronized Lyrics (IndexedDB First with Network Fallback)
   useEffect(() => {
     if (!currentVideoId) {
       setLyrics([]);
@@ -127,23 +127,55 @@ export function Player() {
     }
 
     let isCancelled = false;
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => {
-      try {
-        controller.abort();
-      } catch {}
-    }, 3500);
-
     setIsLyricsLoading(true);
 
-    const dur = Math.round(duration || currentTrackDuration || 200);
-    const url = `/api/lyrics?id=${encodeURIComponent(currentVideoId)}&title=${encodeURIComponent(
-      currentTrackName || ''
-    )}&artist=${encodeURIComponent(currentArtistName)}&duration=${dur}`;
+    const loadLyricsForCurrentTrack = async () => {
+      // 1. CHECK INDEXEDDB FIRST:
+      // If track is downloaded or saved offline, load lyrics directly from IndexedDB without network fetch
+      try {
+        const offlineItem = await db.getOfflineTrack(currentVideoId);
+        if (
+          offlineItem &&
+          Array.isArray(offlineItem.lyrics) &&
+          offlineItem.lyrics.length > 0
+        ) {
+          if (!isCancelled) {
+            setLyrics(offlineItem.lyrics);
+            setIsSyncedLyrics(Boolean(offlineItem.isSyncedLyrics ?? offlineItem.synced));
+            setIsLyricsLoading(false);
+          }
+          return; // 100% Offline from IndexedDB! No network fetch needed.
+        }
+      } catch (err) {
+        console.warn('[PlayerLyrics] Error checking IndexedDB for offline lyrics:', err);
+      }
 
-    fetch(url, { signal: controller.signal })
-      .then((res) => (res.ok ? res.json() : { synced: false, lyrics: [] }))
-      .then((data) => {
+      // 2. IF DEVICE IS OFFLINE: Do NOT make a network request to /api/lyrics
+      if (typeof navigator !== 'undefined' && !navigator.onLine) {
+        if (!isCancelled) {
+          setLyrics([]);
+          setIsSyncedLyrics(false);
+          setIsLyricsLoading(false);
+        }
+        return;
+      }
+
+      // 3. ONLINE FALLBACK: Fetch from API with timeout protection
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => {
+        try {
+          controller.abort();
+        } catch {}
+      }, 4000);
+
+      const dur = Math.round(duration || currentTrackDuration || 200);
+      const url = `/api/lyrics?id=${encodeURIComponent(currentVideoId)}&title=${encodeURIComponent(
+        currentTrackName || ''
+      )}&artist=${encodeURIComponent(currentArtistName)}&duration=${dur}`;
+
+      try {
+        const res = await fetch(url, { signal: controller.signal });
+        const data = res.ok ? await res.json() : { synced: false, lyrics: [] };
         if (!isCancelled) {
           const payload = data?.result !== undefined ? data.result : data;
           if (Array.isArray(payload?.lyrics) && payload.lyrics.length > 0) {
@@ -155,24 +187,21 @@ export function Player() {
             setIsSyncedLyrics(false);
           }
         }
-      })
-      .catch(() => {
+      } catch {
         if (!isCancelled) {
           setLyrics([]);
           setIsSyncedLyrics(false);
         }
-      })
-      .finally(() => {
+      } finally {
         clearTimeout(timeoutId);
         if (!isCancelled) setIsLyricsLoading(false);
-      });
+      }
+    };
+
+    loadLyricsForCurrentTrack();
 
     return () => {
       isCancelled = true;
-      clearTimeout(timeoutId);
-      try {
-        controller.abort();
-      } catch {}
     };
   }, [currentVideoId, currentTrackName, currentArtistName, currentTrackDuration, duration]);
 
@@ -195,7 +224,7 @@ export function Player() {
     [currentTrack, toggleLike]
   );
 
-  // 4. Toggle Download for Offline Playback
+  // 4. Toggle Download for Offline Playback (Audio + Lyrics)
   const handleDownload = useCallback(
     async (e?: React.MouseEvent) => {
       if (e) e.stopPropagation();
@@ -227,13 +256,66 @@ export function Player() {
             }).catch(() => {});
           }
 
-          toast.info('Mengunduh lagu untuk offline...');
-          const result = await db.saveOfflineTrack(trackToProcess);
+          toast.info('Mengunduh lagu dan lirik untuk offline...');
+
+          // Prepare lyrics data to save alongside the audio binary
+          let lyricsToPersist: LyricLine[] = [];
+          let syncedToPersist = false;
+
+          // If current track lyrics are already loaded in player state, reuse them
+          if (lyrics.length > 0 && currentVideoId === trackToProcess.videoId) {
+            lyricsToPersist = lyrics;
+            syncedToPersist = isSyncedLyrics;
+          } else if (typeof navigator !== 'undefined' && navigator.onLine) {
+            // Otherwise, fetch lyrics from API with safe timeout
+            try {
+              const dur = Math.round(duration || trackToProcess.duration || 200);
+              const lyricsUrl = `/api/lyrics?id=${encodeURIComponent(trackToProcess.videoId)}&title=${encodeURIComponent(
+                trackToProcess.name || ''
+              )}&artist=${encodeURIComponent(currentArtistName)}&duration=${dur}`;
+
+              const lyricsController = new AbortController();
+              const lyricsTimeout = setTimeout(() => {
+                try {
+                  lyricsController.abort();
+                } catch {}
+              }, 6000);
+
+              const res = await fetch(lyricsUrl, { signal: lyricsController.signal });
+              clearTimeout(lyricsTimeout);
+              if (res.ok) {
+                const data = await res.json();
+                const payload = data?.result !== undefined ? data.result : data;
+                if (Array.isArray(payload?.lyrics) && payload.lyrics.length > 0) {
+                  lyricsToPersist = normalizeLyrics(payload.lyrics, dur);
+                  syncedToPersist = Boolean(payload.synced);
+                  // Update player state if this track is currently active
+                  if (currentVideoId === trackToProcess.videoId) {
+                    setLyrics(lyricsToPersist);
+                    setIsSyncedLyrics(syncedToPersist);
+                  }
+                }
+              }
+            } catch (lyricErr) {
+              console.warn('[handleDownload] Non-fatal lyrics fetch issue:', lyricErr);
+            }
+          }
+
+          const result = await db.saveOfflineTrack(trackToProcess, undefined, {
+            lyrics: lyricsToPersist,
+            isSyncedLyrics: syncedToPersist,
+            synced: syncedToPersist,
+          });
+
           if (!result || !result.blob) {
             throw new Error('Gagal menyimpan file audio atau data unduhan tidak lengkap');
           }
           setIsDownloaded(true);
-          toast.success('Lagu tersimpan untuk offline');
+          toast.success(
+            lyricsToPersist.length > 0
+              ? 'Lagu dan lirik tersimpan untuk offline'
+              : 'Lagu tersimpan untuk offline'
+          );
         }
       } catch (err: any) {
         console.error('Download toggle error:', err);
@@ -261,7 +343,7 @@ export function Player() {
         setIsDownloading(false);
       }
     },
-    [currentTrack, isDownloaded, isDownloading]
+    [currentTrack, isDownloaded, isDownloading, lyrics, currentVideoId, isSyncedLyrics, duration, currentArtistName]
   );
 
   // 5. Flawless Seek Commit Handlers directly delegating to global MusicContext

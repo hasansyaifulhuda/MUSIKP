@@ -1,20 +1,21 @@
 'use client';
 
 import React, { memo, useEffect, useRef, useState, useCallback, useMemo } from 'react';
-import { Mic2, Loader2, Disc3, Radio, FileText } from 'lucide-react';
+import { Mic2, Loader2, Disc3, Radio, FileText, CheckCircle2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { findActiveLyricIndex, normalizeLyrics, LyricLine } from '@/lib/performance';
 import { getPersistentAudioElement } from '@/lib/audioElement';
 import { usePlayerStore } from '@/lib/store';
+import { db } from '@/lib/db';
 
 export type { LyricLine };
 
 interface LyricsViewProps {
-  lyrics: any[];
+  lyrics?: any[];
   currentTime?: number;
   onSeek: (time: number) => void;
-  isLoading: boolean;
-  isSynced: boolean;
+  isLoading?: boolean;
+  isSynced?: boolean;
 }
 
 interface LyricRowProps {
@@ -66,11 +67,11 @@ const LyricRow = memo(
 );
 
 export const LyricsView = memo(function LyricsView({
-  lyrics,
+  lyrics = [],
   currentTime,
   onSeek,
-  isLoading,
-  isSynced,
+  isLoading = false,
+  isSynced = false,
 }: LyricsViewProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -87,11 +88,74 @@ export const LyricsView = memo(function LyricsView({
   const [showSyncButton, setShowSyncButton] = useState<boolean>(false);
 
   const duration = usePlayerStore((state) => state.duration);
+  const currentTrack = usePlayerStore((state) => state.currentTrack);
+  const currentVideoId = currentTrack?.videoId;
 
-  // 2. Normalize and validate timestamps: seconds vs milliseconds, strings, and chronological sorting
+  // 2. Direct Offline IndexedDB Support:
+  // If track was downloaded or device is offline, read lyrics directly from IndexedDB without network fetch
+  const [localOfflineLyrics, setLocalOfflineLyrics] = useState<LyricLine[] | null>(null);
+  const [isLocalOfflineSynced, setIsLocalOfflineSynced] = useState<boolean>(false);
+  const [isReadingLocalDb, setIsReadingLocalDb] = useState<boolean>(false);
+  const [isOfflineLoaded, setIsOfflineLoaded] = useState<boolean>(false);
+
+  useEffect(() => {
+    if (!currentVideoId) {
+      setLocalOfflineLyrics(null);
+      setIsLocalOfflineSynced(false);
+      setIsOfflineLoaded(false);
+      return;
+    }
+
+    // If lyrics prop is already provided with data
+    if (Array.isArray(lyrics) && lyrics.length > 0) {
+      const isDownloaded = db.isOfflineTrackSync(currentVideoId);
+      setIsOfflineLoaded(isDownloaded);
+      return;
+    }
+
+    // Otherwise (lyrics empty or offline or downloaded track): read directly from IndexedDB
+    let isCancelled = false;
+    setIsReadingLocalDb(true);
+
+    db.getOfflineTrack(currentVideoId)
+      .then((offlineItem) => {
+        if (!isCancelled && offlineItem && Array.isArray(offlineItem.lyrics) && offlineItem.lyrics.length > 0) {
+          setLocalOfflineLyrics(offlineItem.lyrics);
+          setIsLocalOfflineSynced(Boolean(offlineItem.isSyncedLyrics ?? offlineItem.synced));
+          setIsOfflineLoaded(true);
+        }
+      })
+      .catch((err) => {
+        console.warn('[LyricsView] Error reading lyrics from IndexedDB:', err);
+      })
+      .finally(() => {
+        if (!isCancelled) setIsReadingLocalDb(false);
+      });
+
+    return () => {
+      isCancelled = true;
+    };
+  }, [currentVideoId, lyrics]);
+
+  // Combine prop lyrics and IndexedDB offline lyrics
+  const activeLyricsSource = useMemo(() => {
+    if (Array.isArray(lyrics) && lyrics.length > 0) return lyrics;
+    if (Array.isArray(localOfflineLyrics) && localOfflineLyrics.length > 0) return localOfflineLyrics;
+    return [];
+  }, [lyrics, localOfflineLyrics]);
+
+  const activeIsSynced = useMemo(() => {
+    if (Array.isArray(lyrics) && lyrics.length > 0) return isSynced;
+    if (Array.isArray(localOfflineLyrics) && localOfflineLyrics.length > 0) return isLocalOfflineSynced;
+    return isSynced;
+  }, [lyrics, isSynced, localOfflineLyrics, isLocalOfflineSynced]);
+
+  const effectiveIsLoading = isLoading || isReadingLocalDb;
+
+  // 3. Normalize and validate timestamps: seconds vs milliseconds, strings, and chronological sorting
   const normalizedLyrics = useMemo(() => {
-    return normalizeLyrics(lyrics, duration);
-  }, [lyrics, duration]);
+    return normalizeLyrics(activeLyricsSource, duration);
+  }, [activeLyricsSource, duration]);
 
   // Keep lineRefs array in sync with lyrics length
   useEffect(() => {
@@ -107,7 +171,7 @@ export const LyricsView = memo(function LyricsView({
     isUserScrollingRef.current = false;
   }, [normalizedLyrics]);
 
-  // 3. Ultra-Low Overhead Audio Event Listener (Fix Freeze Bug):
+  // 4. Ultra-Low Overhead Audio Event Listener (Fix Freeze Bug):
   // Evaluates active index on timeupdate, but triggers React setState ONLY when the active index changes!
   useEffect(() => {
     const audio = getPersistentAudioElement();
@@ -136,7 +200,7 @@ export const LyricsView = memo(function LyricsView({
     };
   }, [normalizedLyrics]);
 
-  // 4. Synchronize when external scrubber progress changes (seeking via progress bar)
+  // 5. Synchronize when external scrubber progress changes (seeking via progress bar)
   useEffect(() => {
     if (typeof currentTime === 'number' && !isNaN(currentTime)) {
       const newIndex = findActiveLyricIndex(normalizedLyrics, currentTime);
@@ -147,7 +211,7 @@ export const LyricsView = memo(function LyricsView({
     }
   }, [currentTime, normalizedLyrics]);
 
-  // 5. Smooth Scroll & Auto-Center:
+  // 6. Smooth Scroll & Auto-Center:
   // Automatically scrolls the active lyric line to center using native scrollIntoView safely
   useEffect(() => {
     if (activeIndex < 0 || isUserScrollingRef.current) return;
@@ -172,7 +236,7 @@ export const LyricsView = memo(function LyricsView({
     }
   }, [activeIndex]);
 
-  // 6. User Touch / Scroll Handling: temporarily pauses auto-scroll & displays floating re-sync pill
+  // 7. User Touch / Scroll Handling: temporarily pauses auto-scroll & displays floating re-sync pill
   const handleUserInteraction = useCallback(() => {
     isUserScrollingRef.current = true;
     setShowSyncButton(true);
@@ -221,7 +285,7 @@ export const LyricsView = memo(function LyricsView({
   }, []);
 
   // Loading state
-  if (isLoading) {
+  if (effectiveIsLoading) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4 text-white/60 py-28 select-none">
         <div className="relative">
@@ -237,15 +301,20 @@ export const LyricsView = memo(function LyricsView({
 
   // Clean, resilient empty state
   if (!normalizedLyrics || normalizedLyrics.length === 0) {
+    const isDeviceOffline = typeof navigator !== 'undefined' && !navigator.onLine;
     return (
       <div className="flex flex-col items-center justify-center h-full text-white/50 space-y-4 py-28 select-none text-center px-4 max-w-md mx-auto">
         <div className="w-20 h-20 rounded-2xl bg-white/5 border border-white/10 flex items-center justify-center text-white/40 shadow-inner">
           <Mic2 className="w-9 h-9 opacity-50" />
         </div>
         <div className="space-y-1">
-          <p className="text-lg font-bold text-white/90">Lirik tidak tersedia untuk lagu ini</p>
+          <p className="text-lg font-bold text-white/90">
+            {isDeviceOffline ? 'Lirik belum tersimpan di memori offline' : 'Lirik tidak tersedia untuk lagu ini'}
+          </p>
           <p className="text-xs text-white/40 leading-relaxed">
-            Lagu ini belum memiliki lirik di database kami. Pemutaran lagu tetap berjalan normal.
+            {isDeviceOffline
+              ? 'Lirik lagu ini belum diunduh ke penyimpanan IndexedDB perangkat. Unduh lagu saat terhubung internet untuk menyertakan liriknya.'
+              : 'Lagu ini belum memiliki lirik di database kami. Pemutaran lagu tetap berjalan normal.'}
           </p>
         </div>
       </div>
@@ -254,15 +323,22 @@ export const LyricsView = memo(function LyricsView({
 
   return (
     <div className="flex-1 relative flex flex-col min-h-0 w-full overflow-hidden select-none">
-      {/* Informative mode badge for plain lyrics fallback */}
-      {!isSynced && normalizedLyrics.length > 0 && (
-        <div className="pt-3 pb-1 text-center shrink-0">
-          <div className="inline-flex items-center gap-1.5 px-3 py-1 bg-white/5 border border-white/10 rounded-full text-[11px] font-medium text-white/70">
+      {/* Informative mode badge for offline lyrics and plain lyrics */}
+      <div className="pt-3 pb-1 flex flex-wrap items-center justify-center gap-2 shrink-0">
+        {isOfflineLoaded && normalizedLyrics.length > 0 && (
+          <div className="inline-flex items-center gap-1.5 px-3 py-0.5 bg-[#1DB954]/10 border border-[#1DB954]/20 rounded-full text-[11px] font-semibold text-[#1DB954]">
+            <CheckCircle2 className="w-3 h-3 text-[#1DB954]" />
+            <span>Lirik Offline (IndexedDB)</span>
+          </div>
+        )}
+
+        {!activeIsSynced && normalizedLyrics.length > 0 && (
+          <div className="inline-flex items-center gap-1.5 px-3 py-0.5 bg-white/5 border border-white/10 rounded-full text-[11px] font-medium text-white/70">
             <FileText className="w-3 h-3 text-[#1DB954]" />
             <span>Mode Lirik Teks • Ketuk baris untuk melompat</span>
           </div>
-        </div>
-      )}
+        )}
+      </div>
 
       {/* Main Boxless Karaoke Lyrics Container with Smooth Vertical Fade Mask */}
       <div
