@@ -1267,7 +1267,7 @@ export function Player() {
             </header>
 
             {/* MAIN CONTENT AREA BASED ON ACTIVE VIEW */}
-            <div className="flex-1 min-h-0 relative flex flex-col justify-center px-4 md:px-12">
+            <div className="flex-1 min-h-0 relative flex flex-col justify-center px-4 md:px-8">
               {/* TAB 1: COVER ART */}
               {activeView === 'cover' && (
                 <div className="flex-1 flex flex-col items-center justify-center p-4">
@@ -1306,7 +1306,7 @@ export function Player() {
                 <div className="flex-1 min-h-0 flex flex-col relative w-full">
                   <div
                     className={cn(
-                      'absolute top-2 right-4 z-10 transition-all duration-200',
+                      'absolute top-2 left-0 md:left-auto md:right-4 z-10 transition-all duration-200',
                       isMobileUtilityMenuOpen && 'opacity-0 pointer-events-none scale-90'
                     )}
                   >

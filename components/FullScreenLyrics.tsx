@@ -8,6 +8,7 @@ import { getHighResImage, cn } from '@/lib/utils';
 import Image from 'next/image';
 import {
   Minimize2,
+  ChevronDown,
   Play,
   Pause,
   SkipForward,
@@ -322,7 +323,20 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
 
       {/* TOP HEADER */}
       <header className="relative z-20 flex items-center justify-between p-4 md:px-8 border-b border-white/5 bg-black/20 backdrop-blur-md">
-        <div className="flex items-center gap-3.5 min-w-0 pr-4">
+        <div className="flex items-center gap-3 min-w-0 pr-4">
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              onClose();
+            }}
+            className="w-10 h-10 -ml-1 rounded-full flex items-center justify-center hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer shrink-0"
+            aria-label="Kembali"
+            title="Kembali (Esc)"
+          >
+            <ChevronDown className="w-7 h-7" />
+          </button>
           <div className="relative w-11 h-11 rounded-lg overflow-hidden shrink-0 shadow-lg border border-white/10">
             <Image src={thumbnail} alt={currentTrack.name} fill sizes="44px" priority className="object-cover" />
           </div>
@@ -333,7 +347,7 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
             <p className="text-xs text-white/60 truncate">{artistName}</p>
           </div>
           {activeIsSynced && (
-            <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 bg-[#1DB954]/20 border border-[#1DB954]/30 rounded-full text-[11px] font-semibold text-[#1DB954] shrink-0 ml-2">
+            <div className="hidden sm:inline-flex items-center gap-1.5 px-2.5 py-1 bg-[#1DB954]/20 border border-[#1DB954]/30 rounded-full text-[11px] font-semibold text-[#1DB954] shrink-0 ml-1">
               <Sparkles className="w-3 h-3" />
               <span>Tersinkronisasi</span>
             </div>
@@ -451,7 +465,7 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
         {isLoading ? (
           <div className="flex flex-col items-center justify-center h-full text-white/50 space-y-3 animate-in fade-in duration-200">
             <Loader2 className="w-10 h-10 animate-spin text-[#1DB954]" />
-            <p className="text-sm font-semibold text-white/80 animate-pulse">Mencari & menyiapkan lirik imersif...</p>
+            <p className="text-sm font-semibold text-white/80 animate-pulse text-center">Mencari & menyiapkan lirik imersif...</p>
           </div>
         ) : !activeLyrics || activeLyrics.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-white/50 space-y-3 px-6 text-center animate-in fade-in duration-300">
@@ -487,7 +501,7 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
           >
             {/* Mode Banner for Plain Lyrics with Retry and Auto-Timing Action */}
             {!activeIsSynced && (
-              <div className="flex flex-col items-center gap-2 mb-6 max-w-md mx-auto animate-in fade-in duration-200">
+              <div className="flex flex-col items-center gap-2 mb-6 max-w-md mx-auto text-center animate-in fade-in duration-200">
                 <div className="inline-flex items-center gap-2 px-3.5 py-1.5 bg-amber-500/15 border border-amber-500/30 rounded-full text-xs font-semibold text-amber-300 backdrop-blur-md shadow-lg">
                   <FileText className="w-3.5 h-3.5 text-amber-400" />
                   <span>Lirik Teks Biasa • Belum Ada Lirik Sinkron</span>
@@ -532,7 +546,7 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
 
             {/* Intro Instrumental Indicator (Synced Mode Only) */}
             {effectiveIsSynced && activeIndex === -1 && (
-              <div className="py-6 flex flex-col items-center justify-center gap-2 text-white/40 animate-pulse">
+              <div className="py-6 flex flex-col items-center justify-center gap-2 text-white/40 animate-pulse text-center">
                 <Disc3 className="w-7 h-7 animate-spin text-[#1DB954]/70" style={{ animationDuration: '4s' }} />
                 <span className="text-xs font-bold tracking-widest uppercase text-white/60">
                   Musik Mengalun • Intro
@@ -547,7 +561,7 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
 
               if (isSectionHeader) {
                 return (
-                  <div key={`fs-header-${idx}`} className="pt-4 pb-1">
+                  <div key={`fs-header-${idx}`} className="pt-4 pb-1 text-center">
                     <span className="text-xs sm:text-sm font-bold text-[#1DB954] tracking-widest uppercase">
                       {textTrimmed.replace(/[\[\]]/g, '')}
                     </span>
@@ -560,9 +574,9 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
                 return (
                   <div
                     key={`fs-plain-${idx}`}
-                    className="py-1.5 px-4 select-text text-white/85 hover:text-white text-xl sm:text-2xl md:text-3xl font-medium leading-relaxed transition-colors"
+                    className="py-1.5 px-4 select-text text-white/85 hover:text-white text-xl sm:text-2xl md:text-3xl font-medium leading-relaxed transition-colors text-center"
                   >
-                    <p>{line.text}</p>
+                    <p className="text-center">{line.text}</p>
                   </div>
                 );
               }
@@ -583,13 +597,13 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
                   role="button"
                   tabIndex={0}
                   className={cn(
-                    'py-2.5 px-4 cursor-pointer transition-all duration-300 ease-out transform-gpu select-none rounded-2xl',
+                    'py-2.5 px-4 cursor-pointer transition-all duration-300 ease-out transform-gpu select-none rounded-2xl text-center origin-center',
                     isActive
-                      ? 'scale-[1.04] font-black text-white text-3xl sm:text-4xl md:text-5xl lg:text-6xl opacity-100 drop-shadow-[0_4px_30px_rgba(255,255,255,0.45)]'
+                      ? 'scale-[1.05] font-black text-white text-3xl sm:text-4xl md:text-5xl lg:text-6xl opacity-100 drop-shadow-[0_4px_30px_rgba(255,255,255,0.45)]'
                       : 'scale-100 font-bold text-white/30 text-xl sm:text-2xl md:text-3xl lg:text-4xl opacity-35 hover:opacity-75 hover:text-white/80'
                   )}
                 >
-                  <p className="leading-tight tracking-tight transition-colors duration-200">
+                  <p className="leading-tight tracking-tight transition-colors duration-200 text-center">
                     {line.text}
                   </p>
                 </div>

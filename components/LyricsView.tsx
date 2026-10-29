@@ -47,13 +47,13 @@ const LyricRow = memo(
         tabIndex={0}
         aria-label={`Lirik baris ${idx + 1}: ${text}`}
         className={cn(
-          'py-3.5 px-4 cursor-pointer transition-all duration-300 ease-out transform-gpu select-none focus:outline-none origin-center rounded-2xl',
+          'py-3.5 px-4 cursor-pointer transition-all duration-300 ease-out transform-gpu select-none focus:outline-none origin-center text-center rounded-2xl',
           isActive
-            ? 'scale-[1.05] font-black text-white text-2xl sm:text-3xl md:text-4xl opacity-100 drop-shadow-[0_4px_24px_rgba(255,255,255,0.35)] bg-white/[0.04]'
-            : 'scale-100 font-semibold text-white/35 text-lg sm:text-xl md:text-2xl opacity-40 hover:opacity-75 hover:text-white/70 hover:bg-white/[0.02]'
+            ? 'scale-[1.06] font-black text-white text-2xl sm:text-3xl md:text-4xl opacity-100 drop-shadow-[0_4px_30px_rgba(255,255,255,0.45)]'
+            : 'scale-100 font-bold text-white/35 text-lg sm:text-xl md:text-2xl opacity-40 hover:opacity-75 hover:text-white/75'
         )}
       >
-        <p className="leading-relaxed tracking-tight transition-colors duration-200">{text}</p>
+        <p className="leading-relaxed tracking-tight transition-colors duration-200 text-center">{text}</p>
       </div>
     );
   },
@@ -432,12 +432,12 @@ export const LyricsView = memo(function LyricsView({
         onTouchStart={handleUserInteraction}
         onTouchMove={handleUserInteraction}
         onWheel={handleUserInteraction}
-        className="flex-1 overflow-y-auto no-scrollbar py-[35vh] px-4 sm:px-8 max-w-3xl mx-auto w-full text-center space-y-3.5 md:space-y-4 lyrics-mask gpu-accelerated relative"
+        className="flex-1 overflow-y-auto no-scrollbar py-[35vh] px-4 sm:px-8 max-w-3xl mx-auto w-full text-center space-y-4 md:space-y-5 lyrics-mask gpu-accelerated relative"
         style={{ WebkitOverflowScrolling: 'touch' }}
       >
         {/* Intro Instrumental Indicator (Synced Mode Only) */}
         {isSynced && activeIndex === -1 && (
-          <div className="py-6 flex flex-col items-center justify-center gap-2 text-white/40 animate-pulse">
+          <div className="py-6 flex flex-col items-center justify-center gap-2 text-white/40 animate-pulse text-center">
             <Disc3 className="w-6 h-6 animate-spin text-[#1DB954]/60" style={{ animationDuration: '4s' }} />
             <span className="text-xs font-semibold tracking-wider uppercase text-white/50">
               Musik Mengalun • Intro
@@ -452,7 +452,7 @@ export const LyricsView = memo(function LyricsView({
 
           if (isSectionHeader) {
             return (
-              <div key={`lyric-header-${idx}`} className="pt-3 pb-0.5">
+              <div key={`lyric-header-${idx}`} className="pt-3 pb-0.5 text-center">
                 <span className="text-xs font-bold text-[#1DB954] tracking-widest uppercase">
                   {textTrimmed.replace(/[\[\]]/g, '')}
                 </span>
@@ -464,9 +464,9 @@ export const LyricsView = memo(function LyricsView({
             return (
               <div
                 key={`lyric-plain-${idx}`}
-                className="py-1 px-3 select-text text-white/85 hover:text-white text-lg sm:text-xl md:text-2xl font-medium leading-relaxed transition-colors"
+                className="py-1 px-3 select-text text-white/85 hover:text-white text-lg sm:text-xl md:text-2xl font-medium leading-relaxed transition-colors text-center"
               >
-                <p>{line.text}</p>
+                <p className="text-center">{line.text}</p>
               </div>
             );
           }
