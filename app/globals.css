@@ -1,5 +1,28 @@
 @import "tailwindcss";
 
+:root {
+  --accent-color: #1DB954;
+  --accent-rgb: 29, 185, 84;
+  --accent-hover: #1ed760;
+  --bg-primary: #0A0A0A;
+  --bg-surface: #121212;
+  --bg-card: #181818;
+  --bg-elevated: #282828;
+}
+
+.text-accent {
+  color: var(--accent-color) !important;
+}
+.bg-accent {
+  background-color: var(--accent-color) !important;
+}
+.border-accent {
+  border-color: var(--accent-color) !important;
+}
+.fill-accent {
+  fill: var(--accent-color) !important;
+}
+
 @layer utilities {
   /* Hide scrollbars for snap carousels while keeping touch scrolling smooth */
   .no-scrollbar::-webkit-scrollbar {
@@ -46,18 +69,50 @@
     will-change: transform;
   }
 
-  /* GPU Hardware Acceleration for zero-lag mobile rendering */
+  /* GPU Hardware Acceleration for zero-lag 60fps rendering */
   .gpu-accelerated {
     transform: translateZ(0);
+    -webkit-transform: translateZ(0);
     backface-visibility: hidden;
+    -webkit-backface-visibility: hidden;
     perspective: 1000px;
-    will-change: transform;
+    -webkit-perspective: 1000px;
+    will-change: transform, opacity;
   }
 
-  /* CSS Containment for 60fps scrolling in long lists (Search, Playlists, Albums) */
+  /* Smooth 60fps scroll container with momentum and overscroll containment */
+  .scroll-smooth-gpu {
+    scroll-behavior: smooth;
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+    transform: translateZ(0);
+    backface-visibility: hidden;
+  }
+
+  /* CSS Containment utilities for 60fps scrolling & zero reflow */
   .content-auto {
     content-visibility: auto;
     contain-intrinsic-size: 0 58px;
+    contain: layout style paint;
+  }
+  .contain-paint {
+    contain: paint;
+  }
+  .contain-layout {
+    contain: layout;
+  }
+  .contain-strict {
+    contain: strict;
+  }
+  .contain-content {
+    contain: content;
+  }
+
+  /* Tab Visibility API Smart Pausing (Poin 90): Throttle CPU/GPU animations when tab is hidden */
+  [data-tab-hidden="true"] .animate-marquee,
+  [data-tab-hidden="true"] .animate-spin,
+  [data-tab-hidden="true"] .animate-pulse {
+    animation-play-state: paused !important;
   }
 
   /* Lyrics vertical fade mask (smooth PMUSIC-grade gradient fade at top and bottom) */
@@ -88,11 +143,12 @@
   }
 }
 
-/* Base Global Smoothing */
+/* Base Global 60fps Smoothing */
 html {
   color-scheme: dark;
   scroll-behavior: smooth;
   -webkit-tap-highlight-color: transparent;
+  text-rendering: optimizeSpeed;
 }
 
 body {
@@ -103,9 +159,20 @@ body {
   -moz-osx-font-smoothing: grayscale;
 }
 
-/* Ensure all interactive controls have instant pointer feedback */
-button, a, [role="button"], input[type="range"] {
+/* Ensure all interactive controls have instant pointer feedback and zero 300ms tap delay on mobile */
+button, a, [role="button"], input, select, textarea {
   cursor: pointer;
+  touch-action: manipulation;
+  -webkit-touch-callout: none;
+}
+
+/* Zero-lag hardware-accelerated tap response on touch devices / APK WebView */
+@media (hover: none) and (pointer: coarse) {
+  a:active, button:active, [role="button"]:active {
+    opacity: 0.88;
+    transform: scale3d(0.98, 0.98, 1);
+    transition: transform 0.06s ease, opacity 0.06s ease;
+  }
 }
 
 /* Range input cross-browser cleanup */

@@ -16,7 +16,14 @@ import { db, OfflineTrack } from '@/lib/db';
 import { toast } from '@/lib/toast';
 import { getHighResImage } from '@/lib/utils';
 
-import { getPersistentAudioElement } from '@/lib/audioElement';
+import { getPersistentAudioElement, safePlayAudio, pauseAudioSafely, resetAudioElement, safeFadeOut, safeFadeIn } from '@/lib/audioElement';
+import { blobManager } from '@/lib/blobManager';
+import { debouncedLocalStorageSet, debouncedLocalStorageGet } from '@/lib/debouncedStorage';
+import { initAudioEffects, resumeAudioContextSafely } from '@/lib/audioEffects';
+import { useCrossfadeStore } from '@/lib/crossfadeStore';
+import { useAudioQualityStore } from '@/lib/audioQualityStore';
+import { deduplicatedFetch } from '@/lib/clientDeduplication';
+import { useDevModalStore } from '@/lib/devModalStore';
 
 export interface MusicContextType {
   currentTrack: Track | null;
@@ -50,12 +57,15 @@ export interface MusicContextType {
   toggleShuffle: () => void;
   toggleRepeat: () => void;
   addToQueue: (track: any) => void;
+  insertNextInQueue: (track: any) => void;
+  moveQueueItem: (fromIndex: number, toIndex: number) => void;
   clearQueue: () => void;
 }
 
 const MusicContext = createContext<MusicContextType | null>(null);
 
 const LIKED_STORAGE_KEY = 'pmusic_liked_tracks';
+const AUDIO_SESSION_STORAGE_KEY = 'pmusic_audio_session_v1';
 
 export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Store subscriptions
@@ -85,6 +95,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const toggleShuffle = usePlayerStore((state) => state.toggleShuffle);
   const toggleRepeat = usePlayerStore((state) => state.toggleRepeat);
   const addToQueue = usePlayerStore((state) => state.addToQueue);
+  const insertNextInQueue = usePlayerStore((state) => state.insertNextInQueue);
+  const moveQueueItem = usePlayerStore((state) => state.moveQueueItem);
   const clearQueue = usePlayerStore((state) => state.clearQueue);
 
   // Network state change handler: prevent hanging spinners or orphaned buffers
@@ -114,22 +126,65 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Local State & Audio Control Refs
   const [isMuted, setIsMuted] = useState<boolean>(false);
   const isMutedRef = useRef<boolean>(isMuted);
-  isMutedRef.current = isMuted;
+  useEffect(() => {
+    isMutedRef.current = isMuted;
+  }, [isMuted]);
   const isSeekingLockRef = useRef<boolean>(false);
   const seekLockTimerRef = useRef<NodeJS.Timeout | null>(null);
   const loadedTrackIdRef = useRef<string | null>(null);
   const lastProgressRef = useRef<number>(-1);
   const lastMediaSessionUpdateRef = useRef<number>(0);
   const activeBlobUrlRef = useRef<string | null>(null);
-  const audioContextRef = useRef<AudioContext | null>(null);
   const playNextRef = useRef<() => void>(() => {});
   const wakeLockRef = useRef<any>(null);
+
+  // Poin 63: Background Audio Session Recovery refs
+  const pendingResumePositionRef = useRef<number | null>(null);
+  const isSessionRestoredRef = useRef<boolean>(false);
+
+  // Poin 51: Predictive Smart Cache Preloading ref
+  const preloadedNextTrackIdRef = useRef<string | null>(null);
 
   // User gesture & playback failure safeguards
   const hasUserGestureRef = useRef<boolean>(false);
   const retryCountPerTrackRef = useRef<Map<string, number>>(new Map());
   const retryTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastErrorTimestampRef = useRef<number>(0);
+
+  // Poin 51: Predictive Smart Cache Preloading callback
+  const preloadNextTrackSafely = useCallback(async (nextVid: string, nextTrack: Track) => {
+    try {
+      if (db.isOfflineTrackSync(nextVid)) return;
+      if (typeof navigator !== 'undefined' && !navigator.onLine) return;
+
+      const streamUrl = useAudioQualityStore.getState().getStreamUrl(nextVid);
+      if (streamUrl && typeof window !== 'undefined') {
+        fetch(streamUrl, {
+          headers: { Range: 'bytes=0-131071' },
+          priority: 'low' as any,
+        }).catch(() => {});
+      }
+
+      const cachedLyrics = await db.getMetadataCache(`lyrics:${nextVid}`);
+      if (!cachedLyrics) {
+        let artist = '';
+        if (typeof (nextTrack as any).artistName === 'string') {
+          artist = (nextTrack as any).artistName;
+        } else if (typeof nextTrack.artist === 'string') {
+          artist = nextTrack.artist;
+        } else if (Array.isArray(nextTrack.artist)) {
+          artist = nextTrack.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(' ');
+        } else if (nextTrack.artist && typeof nextTrack.artist === 'object') {
+          artist = (nextTrack.artist as any).name || '';
+        }
+        const dur = Math.round(nextTrack.duration || 200);
+        const url = `/api/lyrics?id=${encodeURIComponent(nextVid)}&title=${encodeURIComponent(
+          nextTrack.name || ''
+        )}&artist=${encodeURIComponent(artist)}&duration=${dur}`;
+        deduplicatedFetch(url).catch(() => {});
+      }
+    } catch {}
+  }, []);
 
   // Safely register physical user gesture (click/touch/key) to allow AudioContext creation
   useEffect(() => {
@@ -146,12 +201,10 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // Revoke previous object URLs to prevent memory leaks
+  // Revoke previous object URLs via centralized Blob URL registry to prevent memory leaks
   const cleanupActiveBlobUrl = useCallback(() => {
     if (activeBlobUrlRef.current) {
-      try {
-        URL.revokeObjectURL(activeBlobUrlRef.current);
-      } catch {}
+      blobManager.revoke(activeBlobUrlRef.current);
       activeBlobUrlRef.current = null;
     }
   }, []);
@@ -160,6 +213,11 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   useEffect(() => {
     return () => {
       cleanupActiveBlobUrl();
+      blobManager.revokeAll();
+      if (seekLockTimerRef.current) {
+        clearTimeout(seekLockTimerRef.current);
+        seekLockTimerRef.current = null;
+      }
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
         retryTimerRef.current = null;
@@ -169,14 +227,6 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           wakeLockRef.current.release();
         } catch {}
         wakeLockRef.current = null;
-      }
-      if (audioContextRef.current) {
-        try {
-          if (audioContextRef.current.state !== 'closed') {
-            audioContextRef.current.close().catch(() => {});
-          }
-        } catch {}
-        audioContextRef.current = null;
       }
     };
   }, [cleanupActiveBlobUrl]);
@@ -201,8 +251,87 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     }
   }, []);
 
+  // Poin 63: Background Audio Session Recovery (PWA State Restoration)
+  // Restores last playback position, queue, and player state after browser reload or unexpected PWA termination
+  useEffect(() => {
+    if (isSessionRestoredRef.current) return;
+    isSessionRestoredRef.current = true;
+
+    try {
+      const raw = debouncedLocalStorageGet(AUDIO_SESSION_STORAGE_KEY) || localStorage.getItem(AUDIO_SESSION_STORAGE_KEY);
+      if (!raw) return;
+      const session = JSON.parse(raw);
+      if (!session || !session.videoId) return;
+
+      // Only restore if saved within reasonable time (14 days)
+      if (session.savedAt && Date.now() - session.savedAt > 14 * 24 * 60 * 60 * 1000) return;
+
+      const current = usePlayerStore.getState().currentTrack;
+      if (!current && session.track) {
+        usePlayerStore.setState({
+          currentTrack: session.track,
+          queue: session.queue?.length ? session.queue : [session.track],
+          queueIndex: session.queueIndex ?? 0,
+          isPlaying: false,
+        });
+      }
+
+      if (session.position && session.position > 1) {
+        pendingResumePositionRef.current = session.position;
+        setProgress(session.position);
+        if (session.duration) {
+          setDuration(session.duration);
+        }
+        updateMediaSessionPosition(session.position, session.duration);
+      }
+    } catch (err) {
+      console.warn('[SessionRecovery] Error restoring audio session state:', err);
+    }
+  }, [setProgress, setDuration, updateMediaSessionPosition]);
+
+  // Synchronous session backup immediately on PWA close / tab switch / page unload / freeze
+  useEffect(() => {
+    const handleSaveSession = () => {
+      try {
+        const audio = getPersistentAudioElement();
+        const curr = usePlayerStore.getState().currentTrack;
+        if (curr?.videoId && audio) {
+          const snapshot = {
+            videoId: curr.videoId,
+            track: curr,
+            queue: usePlayerStore.getState().queue,
+            queueIndex: usePlayerStore.getState().queueIndex,
+            position: Math.floor(audio.currentTime || 0),
+            duration: Math.floor(audio.duration || 0),
+            volume: usePlayerStore.getState().volume,
+            savedAt: Date.now(),
+          };
+          localStorage.setItem(AUDIO_SESSION_STORAGE_KEY, JSON.stringify(snapshot));
+        }
+      } catch {}
+    };
+
+    const handleVisibilityChange = () => {
+      if (typeof document !== 'undefined' && document.hidden) {
+        handleSaveSession();
+      }
+    };
+
+    window.addEventListener('pagehide', handleSaveSession);
+    window.addEventListener('beforeunload', handleSaveSession);
+    window.addEventListener('freeze', handleSaveSession);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+
+    return () => {
+      window.removeEventListener('pagehide', handleSaveSession);
+      window.removeEventListener('beforeunload', handleSaveSession);
+      window.removeEventListener('freeze', handleSaveSession);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, []);
+
   // Hardware Audio Focus Keep-Alive (prevents mobile background audio ducking / suspension)
-  // SAFE: Strictly checked against physical user interaction to eliminate browser Autoplay warnings
+  // SAFE: Reuses the audioEffects singleton AudioContext and complies with mobile autoplay policies
   const initAudioContextKeepAlive = useCallback(() => {
     if (typeof window === 'undefined') return;
 
@@ -216,26 +345,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     }
 
     try {
-      const AudioCtx = window.AudioContext || (window as any).webkitAudioContext;
-      if (!AudioCtx) return;
-
-      if (!audioContextRef.current) {
-        const ctx = new AudioCtx();
-        if (ctx.state === 'suspended') {
-          ctx.resume().catch(() => {});
-        }
-        const osc = ctx.createOscillator();
-        const gain = ctx.createGain();
-        gain.gain.value = 0.00001; // Silent anchor
-        osc.connect(gain);
-        gain.connect(ctx.destination);
-        try {
-          osc.start();
-        } catch {}
-        audioContextRef.current = ctx;
-      } else if (audioContextRef.current.state === 'suspended') {
-        audioContextRef.current.resume().catch(() => {});
-      }
+      initAudioEffects();
+      resumeAudioContextSafely();
     } catch {}
   }, []);
 
@@ -283,6 +394,64 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         if (now - lastMediaSessionUpdateRef.current >= 1200) {
           lastMediaSessionUpdateRef.current = now;
           updateMediaSessionPosition(cur, audio.duration);
+
+          // Debounced state persistence for song playback position & full audio session (Poin 63)
+          const curr = usePlayerStore.getState().currentTrack;
+          if (curr?.videoId && cur > 1) {
+            const sessionData = {
+              videoId: curr.videoId,
+              track: curr,
+              queue: usePlayerStore.getState().queue,
+              queueIndex: usePlayerStore.getState().queueIndex,
+              position: Math.floor(cur),
+              duration: Math.floor(audio.duration || 0),
+              volume: usePlayerStore.getState().volume,
+              savedAt: now,
+            };
+            debouncedLocalStorageSet(AUDIO_SESSION_STORAGE_KEY, JSON.stringify(sessionData));
+            debouncedLocalStorageSet(
+              'pmusic_playback_resume',
+              JSON.stringify({
+                videoId: curr.videoId,
+                position: Math.floor(cur),
+                duration: Math.floor(audio.duration || 0),
+                savedAt: now,
+              })
+            );
+          }
+        }
+
+        // Crossfade smooth volume fade-out when reaching track end
+        const crossfadeSec = useCrossfadeStore.getState().crossfadeDuration;
+        if (
+          crossfadeSec > 0 &&
+          audio.duration > 15 &&
+          audio.duration - cur <= crossfadeSec &&
+          audio.duration - cur > 0 &&
+          !audio.paused
+        ) {
+          const ratio = Math.max(0, (audio.duration - cur) / crossfadeSec);
+          const targetVol = Math.max(0, Math.min(1, (usePlayerStore.getState().volume ?? 100) / 100));
+          audio.volume = targetVol * ratio;
+        }
+
+        // Poin 51: Predictive Smart Cache Preloading (Gapless Next Track Buffer)
+        // When current track has <= 18s remaining (and > 8s played), proactively buffer next track
+        if (audio.duration > 25 && audio.duration - cur <= 18 && cur > 8) {
+          const state = usePlayerStore.getState();
+          const q = state.queue;
+          const idx = state.queueIndex;
+          if (Array.isArray(q) && q.length > 0) {
+            const nextIdx = idx + 1 < q.length ? idx + 1 : state.repeatMode === 'all' ? 0 : -1;
+            if (nextIdx !== -1 && q[nextIdx]) {
+              const nextTrack = q[nextIdx];
+              const nextVid = extractVideoId(nextTrack);
+              if (nextVid && preloadedNextTrackIdRef.current !== nextVid) {
+                preloadedNextTrackIdRef.current = nextVid;
+                preloadNextTrackSafely(nextVid, nextTrack);
+              }
+            }
+          }
         }
       }
     };
@@ -297,6 +466,10 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const handlePlay = () => {
       setPlayingStore(true);
       setIsBuffering(false);
+      try {
+        initAudioEffects();
+        resumeAudioContextSafely();
+      } catch {}
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
       }
@@ -414,16 +587,42 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         return;
       }
 
-      // If retry also failed or track is unplayable:
-      // STOP playback, pause audio, reset loading/buffering states.
-      // NEVER trigger playNext() to prevent infinite auto-skip loops!
-      if (audio) {
-        try {
-          audio.pause();
-          audio.removeAttribute('src');
-          audio.load();
-        } catch {}
-      }
+      // Poin 54: Zero-Error Offline Fallback & Cache Swapping
+      // If network stream fails or drops mid-playback, attempt instant fallback to local IndexedDB blob
+      db.getOfflineTrack(trackId).then((offlineFallback) => {
+        if (offlineFallback?.blob) {
+          try {
+            cleanupActiveBlobUrl();
+            const blobUrl = blobManager.create(offlineFallback.blob);
+            activeBlobUrlRef.current = blobUrl;
+            audio.src = blobUrl;
+            audio.currentTime = lastProgressRef.current > 0 ? lastProgressRef.current : 0;
+            audio.load();
+            safePlayAudio(audio).then((ok) => {
+              if (ok) {
+                toast.info('Koneksi terputus: Beralih ke cadangan lagu offline.');
+              }
+            });
+            return;
+          } catch {}
+        }
+
+        // If retry also failed and no offline copy exists:
+        // Cleanly pause and reset loading state without crashing
+        if (audio) {
+          try {
+            audio.pause();
+            audio.removeAttribute('src');
+            audio.load();
+          } catch {}
+        }
+        setIsBuffering(false);
+        setPlayingStore(false);
+        toast.error(`Koneksi audio terputus untuk lagu ini.`);
+      }).catch(() => {
+        setIsBuffering(false);
+        setPlayingStore(false);
+      });
 
       setPlayingStore(false);
       setIsBuffering(false);
@@ -460,7 +659,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       audio.removeEventListener('ended', handleEnded);
       audio.removeEventListener('error', handleError);
     };
-  }, [setPlayingStore, setIsBuffering, setDuration, setProgress, updateMediaSessionPosition]);
+  }, [setPlayingStore, setIsBuffering, setDuration, setProgress, updateMediaSessionPosition, cleanupActiveBlobUrl, preloadNextTrackSafely]);
 
   // =========================================================================
   // Playback Navigation (playNext, playPrev)
@@ -499,9 +698,17 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Core Track Loader: Loads audio source directly into Persistent HTML5 Audio
   // =========================================================================
   const loadAndPlayTrack = useCallback(
-    async (targetVid: string, autoPlay: boolean = true) => {
+    async (targetVid: string, autoPlay: boolean = true, startPosition?: number) => {
       const audio = getPersistentAudioElement();
       if (!audio || !targetVid) return;
+
+      const resumePosition =
+        startPosition !== undefined
+          ? startPosition
+          : pendingResumePositionRef.current !== null
+          ? pendingResumePositionRef.current
+          : 0;
+      pendingResumePositionRef.current = null;
 
       if (retryTimerRef.current) {
         clearTimeout(retryTimerRef.current);
@@ -515,6 +722,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         audio.src !== window.location.href &&
         (
           (activeBlobUrlRef.current && audio.src === activeBlobUrlRef.current) ||
+          blobManager.isRegistered(audio.src) ||
           audio.src.includes(encodeURIComponent(targetVid))
         )
       );
@@ -528,6 +736,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
 
       loadedTrackIdRef.current = targetVid;
+      preloadedNextTrackIdRef.current = null;
 
       if (autoPlay) {
         setIsBuffering(true);
@@ -558,24 +767,25 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
       if (audioBlob && audioBlob.size > 0) {
         cleanupActiveBlobUrl();
-        const blobUrl = URL.createObjectURL(audioBlob);
+        const blobUrl = blobManager.create(audioBlob);
         activeBlobUrlRef.current = blobUrl;
         audio.src = blobUrl;
-        audio.currentTime = 0;
+        audio.currentTime = resumePosition;
+        if (resumePosition > 0) setProgress(resumePosition);
         audio.volume = Math.max(0, Math.min(1, volume / 100));
         audio.muted = isMuted;
         audio.load();
 
+        // Update LRU access timestamp for offline playback
+        db.recordOfflineTrackPlay(targetVid).catch(() => {});
+
         if (autoPlay) {
-          const playPromise = audio.play();
-          if (playPromise !== undefined) {
-            playPromise.catch((err) => {
-              if (err?.name === 'NotAllowedError') {
-                setPlayingStore(false);
-                setIsBuffering(false);
-              }
-            });
-          }
+          safePlayAudio(audio).then((ok) => {
+            if (!ok) {
+              setPlayingStore(false);
+              setIsBuffering(false);
+            }
+          });
         }
         setIsBuffering(false);
         return;
@@ -586,11 +796,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       const isStrictlyOffline = typeof navigator !== 'undefined' && navigator.onLine === false;
       if (isStrictlyOffline) {
         cleanupActiveBlobUrl();
-        try {
-          audio.pause();
-          audio.removeAttribute('src');
-          audio.load();
-        } catch {}
+        resetAudioElement(audio);
         setIsBuffering(false);
         setPlayingStore(false);
         if (autoPlay) {
@@ -601,32 +807,42 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
       // 3. ONLINE STREAM FALLBACK:
       cleanupActiveBlobUrl();
-      const streamUrl = `/api/stream?id=${encodeURIComponent(targetVid)}`;
+      const streamUrl = useAudioQualityStore.getState().getStreamUrl(targetVid);
       const isSameSrc = Boolean(audio.src && audio.src.includes(encodeURIComponent(targetVid)));
 
       if (!isSameSrc) {
+        const crossfadeSec = useCrossfadeStore.getState().crossfadeDuration;
+        if (crossfadeSec > 0 && !audio.paused && audio.currentTime > 1) {
+          try {
+            await safeFadeOut(audio, Math.min(600, crossfadeSec * 300));
+          } catch {}
+        }
+
+        pauseAudioSafely(audio);
         audio.src = streamUrl;
-        audio.currentTime = 0;
+        audio.currentTime = resumePosition;
+        if (resumePosition > 0) setProgress(resumePosition);
         audio.volume = Math.max(0, Math.min(1, volume / 100));
         audio.muted = isMuted;
         audio.load();
       }
 
       if (autoPlay) {
-        try {
-          const playPromise = audio.play();
-          if (playPromise !== undefined) {
-            playPromise.catch((err) => {
-              if (err?.name === 'NotAllowedError') {
-                setPlayingStore(false);
-                setIsBuffering(false);
-              }
-            });
+        safePlayAudio(audio).then((ok) => {
+          if (!ok) {
+            setPlayingStore(false);
+            setIsBuffering(false);
+          } else {
+            const crossfadeSec = useCrossfadeStore.getState().crossfadeDuration;
+            if (crossfadeSec > 0) {
+              const targetVol = Math.max(0, Math.min(1, volume / 100));
+              safeFadeIn(audio, targetVol, Math.min(700, crossfadeSec * 350)).catch(() => {});
+            }
           }
-        } catch {}
+        });
       }
     },
-    [volume, isMuted, cleanupActiveBlobUrl, setIsBuffering, setPlayingStore]
+    [volume, isMuted, cleanupActiveBlobUrl, setIsBuffering, setPlayingStore, setProgress]
   );
 
   // =========================================================================
@@ -731,6 +947,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             audio.src !== window.location.href &&
             (
               (activeBlobUrlRef.current && audio.src === activeBlobUrlRef.current) ||
+              blobManager.isRegistered(audio.src) ||
               audio.src.includes(encodeURIComponent(vid))
             )
           );
@@ -741,21 +958,27 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             return;
           }
         }
-        audio.play().catch((err) => {
-          if (err?.name === 'NotAllowedError') {
+        if (pendingResumePositionRef.current !== null && pendingResumePositionRef.current > 0) {
+          const seekPos = pendingResumePositionRef.current;
+          pendingResumePositionRef.current = null;
+          audio.currentTime = seekPos;
+          setProgress(seekPos);
+        }
+        safePlayAudio(audio).then((ok) => {
+          if (!ok) {
             setPlayingStore(false);
             setIsBuffering(false);
           }
         });
       } else {
-        audio.pause();
+        pauseAudioSafely(audio);
       }
     }
 
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = nextPlaying ? 'playing' : 'paused';
     }
-  }, [setPlayingStore, setIsBuffering, initAudioContextKeepAlive, loadAndPlayTrack]);
+  }, [setPlayingStore, setIsBuffering, initAudioContextKeepAlive, loadAndPlayTrack, setProgress]);
 
   const setPlaying = useCallback(
     async (playing: boolean) => {
@@ -777,6 +1000,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
               audio.src !== window.location.href &&
               (
                 (activeBlobUrlRef.current && audio.src === activeBlobUrlRef.current) ||
+                blobManager.isRegistered(audio.src) ||
                 audio.src.includes(encodeURIComponent(vid))
               )
             );
@@ -787,14 +1011,14 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
               return;
             }
           }
-          audio.play().catch((err) => {
-            if (err?.name === 'NotAllowedError') {
+          safePlayAudio(audio).then((ok) => {
+            if (!ok) {
               setPlayingStore(false);
               setIsBuffering(false);
             }
           });
         } else {
-          audio.pause();
+          pauseAudioSafely(audio);
         }
       }
 
@@ -874,6 +1098,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     next: () => {},
     prev: () => {},
     seekTo: (time: number) => {},
+    toggleShuffle: () => {},
+    toggleRepeat: () => {},
   });
 
   useEffect(() => {
@@ -883,33 +1109,44 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       next: () => playNext(),
       prev: () => playPrev(),
       seekTo: (time: number) => seekTo(time),
+      toggleShuffle: () => toggleShuffle(),
+      toggleRepeat: () => toggleRepeat(),
     };
-  }, [setPlaying, playNext, playPrev, seekTo]);
+  }, [setPlaying, playNext, playPrev, seekTo, toggleShuffle, toggleRepeat]);
 
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
 
     const ms = navigator.mediaSession;
 
-    // Safe action registration helper to prevent unsupported actions from blocking standard ones
+    const VALID_MEDIA_SESSION_ACTIONS: MediaSessionAction[] = [
+      'play',
+      'pause',
+      'previoustrack',
+      'nexttrack',
+      'seekto',
+      'seekbackward',
+      'seekforward',
+      'stop',
+    ];
+
+    // Safe action registration helper to prevent unsupported actions from throwing or blocking standard ones
     const safeSetActionHandler = (
       action: MediaSessionAction,
       handler: MediaSessionActionHandler | null
     ) => {
       try {
+        if (!VALID_MEDIA_SESSION_ACTIONS.includes(action)) return;
         ms.setActionHandler(action, handler);
-      } catch (err) {
-        // Suppress errors for actions not supported by this browser/OS version
-        console.warn(`[MediaSession] Action "${action}" not supported on this platform:`, err);
+      } catch {
+        // Silently suppress in case specific platform does not implement the action
       }
     };
 
     // 1. Play Action: Resumes playback and restores audio focus safely
     safeSetActionHandler('play', async () => {
       try {
-        if (audioContextRef.current && audioContextRef.current.state === 'suspended') {
-          await audioContextRef.current.resume().catch(() => {});
-        }
+        resumeAudioContextSafely();
         mediaActionsRef.current.play();
         if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'playing';
@@ -989,7 +1226,6 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     });
 
     // 8. Stop Action: Handles mobile OS audio focus abandonment or notification dismiss
-    // CRITICAL: NEVER wipe or clear queue state on stop/pause interrupt!
     safeSetActionHandler('stop', () => {
       try {
         mediaActionsRef.current.pause();
@@ -1002,17 +1238,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     });
 
     return () => {
-      const actions: MediaSessionAction[] = [
-        'play',
-        'pause',
-        'previoustrack',
-        'nexttrack',
-        'seekto',
-        'seekbackward',
-        'seekforward',
-        'stop',
-      ];
-      actions.forEach((action) => {
+      VALID_MEDIA_SESSION_ACTIONS.forEach((action) => {
         safeSetActionHandler(action, null);
       });
     };
@@ -1020,30 +1246,39 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   // Sync MediaMetadata with Current Track
   useEffect(() => {
-    if (currentTrack && typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-      const rawThumbnail = currentTrack.thumbnails?.[currentTrack.thumbnails.length - 1]?.url;
-      const thumbnail = rawThumbnail ? getHighResImage(rawThumbnail, 800) : '/icon.png';
-      const artist = Array.isArray(currentTrack.artist)
-        ? currentTrack.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(', ')
-        : (typeof currentTrack.artist === 'string' ? currentTrack.artist : currentTrack.artist?.name) || 'Unknown Artist';
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
 
+    if (!currentTrack) {
       try {
-        navigator.mediaSession.metadata = new MediaMetadata({
-          title: currentTrack.name || 'PMUSIC Track',
-          artist: artist || 'PMUSIC Artist',
-          album: 'PMUSIC',
-          artwork: [
-            { src: thumbnail, sizes: '96x96', type: 'image/jpeg' },
-            { src: thumbnail, sizes: '128x128', type: 'image/jpeg' },
-            { src: thumbnail, sizes: '192x192', type: 'image/jpeg' },
-            { src: thumbnail, sizes: '256x256', type: 'image/jpeg' },
-            { src: thumbnail, sizes: '384x384', type: 'image/jpeg' },
-            { src: thumbnail, sizes: '512x512', type: 'image/jpeg' },
-          ],
-        });
-      } catch (err) {
-        console.warn('[MediaSession] Metadata update error:', err);
-      }
+        navigator.mediaSession.metadata = null;
+        navigator.mediaSession.playbackState = 'none';
+      } catch {}
+      return;
+    }
+
+    const rawThumbnail = currentTrack.thumbnails?.[currentTrack.thumbnails.length - 1]?.url;
+    const artist = Array.isArray(currentTrack.artist)
+      ? currentTrack.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(', ')
+      : (typeof currentTrack.artist === 'string' ? currentTrack.artist : currentTrack.artist?.name) || 'Unknown Artist';
+
+    const albumTitle = (currentTrack as any).album?.name || (currentTrack as any).album || 'MusicFY';
+
+    try {
+      navigator.mediaSession.metadata = new MediaMetadata({
+        title: currentTrack.name || 'MusicFY Track',
+        artist: artist || 'MusicFY Artist',
+        album: albumTitle,
+        artwork: [
+          { src: getHighResImage(rawThumbnail, 96), sizes: '96x96', type: 'image/jpeg' },
+          { src: getHighResImage(rawThumbnail, 128), sizes: '128x128', type: 'image/jpeg' },
+          { src: getHighResImage(rawThumbnail, 192), sizes: '192x192', type: 'image/jpeg' },
+          { src: getHighResImage(rawThumbnail, 256), sizes: '256x256', type: 'image/jpeg' },
+          { src: getHighResImage(rawThumbnail, 384), sizes: '384x384', type: 'image/jpeg' },
+          { src: getHighResImage(rawThumbnail, 512), sizes: '512x512', type: 'image/jpeg' },
+        ],
+      });
+    } catch (err) {
+      console.warn('[MediaSession] Metadata update error:', err);
     }
   }, [currentTrack]);
 
@@ -1053,6 +1288,45 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
     }
   }, [isPlaying]);
+
+  // Poin 95: Dynamic Document Title & Favicon Sync
+  useEffect(() => {
+    if (typeof document === 'undefined') return;
+    if (!currentTrack) {
+      document.title = 'MusicFY - Pemutar Musik';
+      return;
+    }
+
+    const artist = Array.isArray(currentTrack.artist)
+      ? currentTrack.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(', ')
+      : (typeof currentTrack.artist === 'string' ? currentTrack.artist : currentTrack.artist?.name) || 'Unknown Artist';
+
+    const cleanTitle = currentTrack.name || 'Lagu';
+    if (isPlaying) {
+      document.title = `▶ ${cleanTitle} • ${artist} | MusicFY`;
+    } else {
+      document.title = `❚❚ ${cleanTitle} • ${artist} | MusicFY`;
+    }
+  }, [currentTrack, isPlaying]);
+
+  // Poin 90: Tab Visibility API Smart Pausing
+  // Throttles non-essential animations when tab is hidden while keeping audio continuous
+  useEffect(() => {
+    const handleVisibility = () => {
+      if (typeof document === 'undefined') return;
+      if (document.hidden) {
+        document.documentElement.setAttribute('data-tab-hidden', 'true');
+      } else {
+        document.documentElement.removeAttribute('data-tab-hidden');
+        resumeAudioContextSafely();
+      }
+    };
+
+    document.addEventListener('visibilitychange', handleVisibility);
+    return () => {
+      document.removeEventListener('visibilitychange', handleVisibility);
+    };
+  }, []);
 
   // =========================================================================
   // Background Playback Guardian & Screen WakeLock
@@ -1106,7 +1380,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Safely hydrate from localStorage on client mount (prevents SSR hydration mismatch)
   useEffect(() => {
     try {
-      const stored = localStorage.getItem(LIKED_STORAGE_KEY) || localStorage.getItem('spotify_liked_tracks');
+      const stored = debouncedLocalStorageGet(LIKED_STORAGE_KEY) || localStorage.getItem('spotify_liked_tracks');
       if (stored) {
         const parsed = JSON.parse(stored);
         if (Array.isArray(parsed) && parsed.length > 0) {
@@ -1134,7 +1408,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           idbSongs.forEach((t) => map.set(t.videoId, t));
           const merged = Array.from(map.values());
           try {
-            localStorage.setItem(LIKED_STORAGE_KEY, JSON.stringify(merged));
+            debouncedLocalStorageSet(LIKED_STORAGE_KEY, JSON.stringify(merged));
           } catch {}
           return merged;
         });
@@ -1165,7 +1439,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           next = [track, ...prev.filter((t) => t.videoId !== track.videoId)];
         }
         try {
-          localStorage.setItem(LIKED_STORAGE_KEY, JSON.stringify(next));
+          debouncedLocalStorageSet(LIKED_STORAGE_KEY, JSON.stringify(next));
         } catch {}
         return next;
       });
@@ -1198,6 +1472,19 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       seekTo(Math.min(dur, cur + 5));
     },
     onToggleMute: toggleMute,
+    onNextTrack: playNext,
+    onPrevTrack: playPrev,
+    onVolumeUp: () => {
+      const curVol = usePlayerStore.getState().volume ?? 100;
+      setVolume(Math.min(100, curVol + 5));
+    },
+    onVolumeDown: () => {
+      const curVol = usePlayerStore.getState().volume ?? 100;
+      setVolume(Math.max(0, curVol - 5));
+    },
+    onToggleDevPanel: () => {
+      useDevModalStore.getState().toggleModal();
+    },
   });
 
   const value = useMemo<MusicContextType>(
@@ -1231,6 +1518,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       toggleShuffle,
       toggleRepeat,
       addToQueue,
+      insertNextInQueue,
+      moveQueueItem,
       clearQueue,
     }),
     [
@@ -1260,6 +1549,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       toggleShuffle,
       toggleRepeat,
       addToQueue,
+      insertNextInQueue,
+      moveQueueItem,
       clearQueue,
     ]
   );

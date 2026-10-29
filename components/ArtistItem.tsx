@@ -11,11 +11,21 @@ export const ArtistItem = memo(function ArtistItem({ artist }: { artist: any }) 
 
   return (
     <div
-      className="flex items-center p-2.5 hover:bg-white/10 rounded-md cursor-pointer group transition-colors select-none"
+      className="flex items-center p-2.5 hover:bg-white/10 rounded-md cursor-pointer group transition-colors select-none content-auto gpu-accelerated"
       onClick={() => router.push(`/artist/${artist.artistId}`)}
     >
-      <div className="relative w-12 h-12 rounded-full overflow-hidden shrink-0 bg-white/10 shadow">
-        {thumbnail && <Image src={thumbnail} alt={artist.name} fill sizes="48px" className="object-cover" />}
+      <div className="relative w-12 h-12 rounded-full overflow-hidden shrink-0 shadow bg-white/5">
+        {thumbnail && (
+          <Image
+            src={thumbnail}
+            alt={artist.name}
+            fill
+            sizes="48px"
+            loading="lazy"
+            decoding="async"
+            className="object-cover"
+          />
+        )}
       </div>
       <div className="ml-3.5 flex-1 min-w-0">
         <h4 className="font-semibold text-sm text-white group-hover:text-[#1DB954] transition-colors truncate">

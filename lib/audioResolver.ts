@@ -553,14 +553,18 @@ async function resolveItunesToQuery(itunesId: string): Promise<string | null> {
  *   4. Cookie Health Detection: Inspects stderr for cookie invalidation signatures.
  *   5. Fallback execution without cookies using visionos/android client if primary fails.
  */
-export async function resolveAudioStream(videoIdOrUrl: string): Promise<ResolvedAudioStream> {
+export async function resolveAudioStream(
+  videoIdOrUrl: string,
+  quality: string = 'auto'
+): Promise<ResolvedAudioStream> {
   const rawId = sanitizeVideoId(videoIdOrUrl);
   if (!rawId) {
     throw new Error('Invalid track ID or URL format');
   }
 
-  // 1. In-Memory Cache Lookup with In-Flight Request Deduplication
-  return await streamCache.getOrFetch(rawId, async () => {
+  // 1. In-Memory Cache Lookup with Quality Differentiation
+  const cacheKey = quality && quality !== 'auto' ? `${rawId}:${quality}` : rawId;
+  return await streamCache.getOrFetch(cacheKey, async () => {
     let targetArg: string;
     let actualVideoId = rawId;
 
@@ -575,7 +579,12 @@ export async function resolveAudioStream(videoIdOrUrl: string): Promise<Resolved
     }
 
     const cookiesPath = getCookiesPath();
-    const baseAudioFormat = 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best';
+    const baseAudioFormat =
+      quality === 'low'
+        ? 'bestaudio[abr<=96]/worstaudio[ext=m4a]/bestaudio[ext=m4a]/best'
+        : quality === 'high'
+        ? 'bestaudio[abr>=160]/bestaudio[ext=m4a]/bestaudio/best'
+        : 'bestaudio[ext=m4a]/bestaudio[ext=mp3]/bestaudio/best';
     const stealthUserAgent = getRandomStealthUserAgent();
 
     // -------------------------------------------------------------

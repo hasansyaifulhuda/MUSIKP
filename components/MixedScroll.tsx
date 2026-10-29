@@ -61,7 +61,7 @@ export const MixedScroll = memo(function MixedScroll({ title, items }: MixedScro
           return (
             <div
               key={`${item.videoId || item.playlistId || item.albumId || item.artistId}-${i}`}
-              className="flex-none w-36 md:w-44 p-3 bg-[#181818]/60 hover:bg-[#282828] rounded-md cursor-pointer group snap-start transition-colors duration-200 select-none shadow-sm flex flex-col gpu-accelerated"
+              className="flex-none w-36 md:w-44 p-3 bg-[#181818]/60 hover:bg-[#282828] rounded-md cursor-pointer group snap-start transition-colors duration-200 select-none shadow-sm flex flex-col gpu-accelerated content-auto"
               onClick={handleClick}
             >
               <div
@@ -74,7 +74,9 @@ export const MixedScroll = memo(function MixedScroll({ title, items }: MixedScro
                   alt={titleText}
                   fill
                   sizes="(max-width: 768px) 144px, 176px"
-                  loading="lazy"
+                  priority={i < 3}
+                  loading={i < 3 ? undefined : 'lazy'}
+                  decoding="async"
                   className="object-cover"
                 />
                 <div className="absolute right-2 bottom-2 w-10 h-10 md:w-11 md:h-11 rounded-full bg-[#1DB954] text-black flex items-center justify-center opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 transition-all duration-200 shadow-[0_8px_8px_rgba(0,0,0,0.3)] hover:scale-105 active:scale-95">

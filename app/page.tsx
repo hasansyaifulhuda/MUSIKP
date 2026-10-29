@@ -25,10 +25,48 @@ import { getHighResImage } from '@/lib/utils';
 import { MarqueeText } from '@/components/MarqueeText';
 import { toast } from '@/lib/toast';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
-import { HorizontalScroll } from '@/components/HorizontalScroll';
-import { MixedScroll } from '@/components/MixedScroll';
+import dynamic from 'next/dynamic';
 import { CommunityPlaylistCard } from '@/components/CommunityPlaylistCard';
 import { HomeSkeleton } from '@/components/HomeSkeleton';
+import { Equalizer } from '@/components/Equalizer';
+
+const HorizontalScroll = dynamic(
+  () => import('@/components/HorizontalScroll').then((m) => m.HorizontalScroll),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="mb-6 px-4 animate-pulse">
+        <div className="w-40 h-6 bg-white/10 rounded-lg mb-3" />
+        <div className="flex gap-4 overflow-hidden">
+          {[1, 2, 3, 4, 5].map((i) => (
+            <div key={i} className="w-36 md:w-44 shrink-0 space-y-2">
+              <div className="aspect-square bg-white/5 rounded-xl" />
+              <div className="h-3.5 bg-white/10 rounded w-3/4" />
+              <div className="h-3 bg-white/5 rounded w-1/2" />
+            </div>
+          ))}
+        </div>
+      </div>
+    ),
+  }
+);
+
+const MixedScroll = dynamic(
+  () => import('@/components/MixedScroll').then((m) => m.MixedScroll),
+  {
+    ssr: false,
+    loading: () => (
+      <div className="mb-6 px-4 animate-pulse">
+        <div className="w-40 h-6 bg-white/10 rounded-lg mb-3" />
+        <div className="flex gap-4 overflow-hidden">
+          {[1, 2, 3, 4].map((i) => (
+            <div key={i} className="w-48 md:w-56 shrink-0 h-24 bg-white/5 rounded-xl" />
+          ))}
+        </div>
+      </div>
+    ),
+  }
+);
 
 const ONLINE_PILLS = ['Semua', 'Musik', 'Trending', 'Santai', 'Fokus', 'Pop', 'Rock', 'Akustik'];
 
@@ -101,12 +139,14 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
     loadDownloadedTracks();
 
     // Auto-sync when window regains focus in case user downloaded/deleted a track
     const handleSync = () => {
       db.getOfflineTracks()
         .then((items) => {
+          if (!mounted) return;
           const sorted = (items || []).sort(
             (a, b) => (b.downloadedAt || 0) - (a.downloadedAt || 0)
           );
@@ -116,7 +156,10 @@ export default function Home() {
     };
 
     window.addEventListener('focus', handleSync);
-    return () => window.removeEventListener('focus', handleSync);
+    return () => {
+      mounted = false;
+      window.removeEventListener('focus', handleSync);
+    };
   }, [loadDownloadedTracks]);
 
   // -------------------------------------------------------------
@@ -357,7 +400,7 @@ export default function Home() {
 
             <Link
               href="/history"
-              prefetch={true}
+              prefetch={false}
               className="p-2.5 bg-white/5 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/10"
               title="Riwayat Pemutaran"
             >
@@ -365,7 +408,7 @@ export default function Home() {
             </Link>
             <Link
               href="/download"
-              prefetch={true}
+              prefetch={false}
               className="p-2.5 bg-white/5 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/10 relative"
               title="Kelola Unduhan"
             >
@@ -378,7 +421,7 @@ export default function Home() {
             </Link>
             <Link
               href="/settings"
-              prefetch={true}
+              prefetch={false}
               className="p-2.5 bg-white/5 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/10"
               title="Pengaturan"
             >
@@ -418,7 +461,7 @@ export default function Home() {
             <div className="flex items-center gap-2 shrink-0">
               <Link
                 href="/history"
-                prefetch={true}
+                prefetch={false}
                 className="p-2.5 bg-white/5 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/10"
                 title="Riwayat Pemutaran"
               >
@@ -426,7 +469,7 @@ export default function Home() {
               </Link>
               <Link
                 href="/download"
-                prefetch={true}
+                prefetch={false}
                 className="p-2.5 bg-white/5 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/10 relative"
                 title="Kelola Unduhan"
               >
@@ -439,7 +482,7 @@ export default function Home() {
               </Link>
               <Link
                 href="/settings"
-                prefetch={true}
+                prefetch={false}
                 className="p-2.5 bg-white/5 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/10"
                 title="Pengaturan"
               >
@@ -503,7 +546,7 @@ export default function Home() {
           ) : activeOnlineFilter !== 'Semua' ? (
             <div className="space-y-8">
               {filterData.map((cat, i) => (
-                <HorizontalScroll key={`filter-${cat.title}-${i}`} title={cat.title} tracks={cat.tracks} />
+                <HorizontalScroll key={`filter-${cat.title}-${i}`} title={cat.title} tracks={cat.tracks} isFirstShelf={i === 0} />
               ))}
             </div>
           ) : (
@@ -547,7 +590,16 @@ export default function Home() {
                                 onClick={() => playTrack(track, quickPicksTracks, 'similar')}
                               >
                                 <div className="relative w-12 h-12 rounded-[4px] overflow-hidden shrink-0 shadow-md bg-white/5">
-                                  <Image src={thumb} alt={track.name} fill sizes="48px" className="object-cover" />
+                                  <Image
+                                    src={thumb}
+                                    alt={track.name}
+                                    fill
+                                    sizes="48px"
+                                    priority={i === 0 && j < 3}
+                                    loading={i === 0 && j < 3 ? undefined : 'lazy'}
+                                    decoding="async"
+                                    className="object-cover"
+                                  />
                                   <div className="absolute inset-0 bg-black/40 flex items-center justify-center opacity-0 group-hover:opacity-100 transition-opacity">
                                     <Play className="w-4 h-4 fill-white text-white ml-0.5" />
                                   </div>
@@ -584,6 +636,7 @@ export default function Home() {
                     </div>
                     <Link
                       href="/download"
+                      prefetch={false}
                       className="text-xs font-bold text-white/80 hover:text-white transition-colors"
                     >
                       Lihat Semua
@@ -615,7 +668,16 @@ export default function Home() {
                           className="flex-none w-36 md:w-44 p-3 bg-[#181818]/60 hover:bg-[#282828] rounded-md cursor-pointer group snap-start transition-colors duration-200 select-none shadow-sm flex flex-col items-center text-center"
                         >
                           <div className="relative w-28 h-28 md:w-36 md:h-36 rounded-full overflow-hidden shadow-xl bg-black/40 mb-3 group-hover:scale-105 transition-transform duration-200">
-                            <Image src={thumb} alt={artistName} fill sizes="144px" className="object-cover" />
+                            <Image
+                              src={thumb}
+                              alt={artistName}
+                              fill
+                              sizes="144px"
+                              priority={i < 3}
+                              loading={i < 3 ? undefined : 'lazy'}
+                              decoding="async"
+                              className="object-cover"
+                            />
                             <div className="absolute inset-0 bg-black/30 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                               <div className="w-10 h-10 rounded-full bg-[#1DB954] text-black flex items-center justify-center shadow-lg">
                                 <Play className="w-5 h-5 fill-current ml-0.5" />
@@ -640,7 +702,7 @@ export default function Home() {
                 cat.type === 'mixed' ? (
                   <MixedScroll key={`cat-mixed-${cat.key || i}`} title={cat.title} items={cat.items} />
                 ) : (
-                  <HorizontalScroll key={`cat-song-${cat.key || i}`} title={cat.title} tracks={cat.items} />
+                  <HorizontalScroll key={`cat-song-${cat.key || i}`} title={cat.title} tracks={cat.items} isFirstShelf={i === 0 && quickPicksTracks.length === 0} />
                 )
               )}
 
@@ -730,11 +792,7 @@ export default function Home() {
                         {/* Track Index or Equalizer */}
                         <div className="w-6 text-center text-xs text-white/40 group-hover:text-white font-mono shrink-0">
                           {isCurrent && isPlaying ? (
-                            <div className="flex gap-0.5 items-end h-3.5 justify-center">
-                              <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_0ms]" />
-                              <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_200ms]" />
-                              <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_400ms]" />
-                            </div>
+                            <Equalizer size="sm" />
                           ) : (
                             index + 1
                           )}
@@ -747,6 +805,8 @@ export default function Home() {
                             alt={track.name}
                             fill
                             sizes="48px"
+                            loading="lazy"
+                            decoding="async"
                             className="object-cover"
                           />
                           <div className="absolute top-0.5 right-0.5 w-3 h-3 rounded-full bg-[#1DB954] flex items-center justify-center shadow">

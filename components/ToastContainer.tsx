@@ -9,7 +9,7 @@ export function ToastContainer() {
 
   return (
     <div
-      className="fixed bottom-20 md:bottom-28 left-1/2 -translate-x-1/2 z-[120] pointer-events-none flex flex-col items-center gap-2 max-w-[90vw] select-none"
+      className="fixed bottom-20 md:bottom-28 left-1/2 -translate-x-1/2 z-[300] pointer-events-none flex flex-col items-center gap-2 max-w-[90vw] select-none"
       aria-live="polite"
     >
       <AnimatePresence>

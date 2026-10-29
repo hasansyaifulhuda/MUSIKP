@@ -1,24 +1,21 @@
-// PMUSIC PWA Service Worker (v6)
-// Advanced Offline & Client-Side Cache Strategy
+// MusicFY PWA Service Worker (v3)
+// Advanced Stale-While-Revalidate Caching Strategy & Shell Pre-caching
+// Excludes Next.js internal chunks & RSC routes to guarantee seamless client-side navigation without full-page reloads
 
-const CACHE_NAME = 'pmusic-v6-cache';
+const CACHE_NAME = 'musicfy-v3-cache';
 const CORE_ASSETS = [
   '/',
-  '/download',
-  '/library',
-  '/history',
-  '/settings',
   '/manifest.json',
   '/icon.png',
   '/favicon.ico',
+  '/workers/lyricsWorker.js',
 ];
 
-// 1. Install Event: Cache critical app shell routes & assets immediately
+// 1. Install Event: Cache critical standalone app shell assets immediately
 self.addEventListener('install', (event) => {
   self.skipWaiting();
   event.waitUntil(
     caches.open(CACHE_NAME).then((cache) => {
-      // Use individual catches so any single missing asset does NOT fail the entire installation
       return Promise.allSettled(
         CORE_ASSETS.map((asset) =>
           cache.add(asset).catch((err) => {
@@ -33,102 +30,29 @@ self.addEventListener('install', (event) => {
 // 2. Activate Event: Clean up outdated caches and immediately claim clients
 self.addEventListener('activate', (event) => {
   event.waitUntil(
-    caches.keys().then((keys) => {
-      return Promise.all(
-        keys.map((key) => {
-          if (key !== CACHE_NAME) {
-            return caches.delete(key);
-          }
-        })
-      );
-    }).then(() => self.clients.claim())
+    caches
+      .keys()
+      .then((keys) => {
+        return Promise.all(
+          keys.map((key) => {
+            if (key !== CACHE_NAME) {
+              return caches.delete(key);
+            }
+          })
+        );
+      })
+      .then(() => self.clients.claim())
   );
 });
 
-// 3. Fetch Event: Clean PWA strategy with seamless offline support
-self.addEventListener('fetch', (event) => {
-  // Only process standard GET requests
-  if (event.request.method !== 'GET') return;
-
-  const urlString = event.request.url;
-  // Ignore non-http schemes (chrome-extension, blob, data, etc.)
-  if (!urlString || !urlString.startsWith('http')) return;
-
-  let url;
-  try {
-    url = new URL(urlString);
-  } catch {
-    return;
-  }
-
-  // Bypass all API endpoints, hot module reload, and external audio/video CDNs
-  if (
-    url.pathname.startsWith('/api/') ||
-    url.pathname.includes('/_next/webpack-hmr') ||
-    url.hostname.includes('youtube.com') ||
-    url.hostname.includes('youtube-nocookie.com') ||
-    url.hostname.includes('googlevideo.com') ||
-    url.hostname.includes('ytimg.com') ||
-    url.hostname.includes('ggpht.com') ||
-    url.hostname.includes('mzstatic.com') ||
-    url.hostname.includes('itunes.apple.com') ||
-    url.hostname.includes('doubleclick.net')
-  ) {
-    return;
-  }
-
-  // Bypass any HTTP Range requests (crucial for audio/video stream playback stability)
-  if (event.request.headers.has('range')) {
-    return;
-  }
-
-  // Navigation requests (HTML pages): Network-First with resilient Offline App Shell Fallback
-  if (event.request.mode === 'navigate') {
-    event.respondWith(
-      fetch(event.request)
-        .then((networkResponse) => {
-          if (networkResponse && networkResponse.status === 200) {
-            const responseClone = networkResponse.clone();
-            caches
-              .open(CACHE_NAME)
-              .then((cache) => {
-                cache.put(event.request, responseClone).catch(() => {});
-              })
-              .catch(() => {});
-          }
-          return networkResponse;
-        })
-        .catch(async () => {
-          // 1. Try exact cached navigation route (e.g. /download, /library, /)
-          const cachedMatch = await caches.match(event.request);
-          if (cachedMatch) return cachedMatch;
-
-          // 2. Try URL pathname without query strings
-          const cleanPathMatch = await caches.match(url.pathname);
-          if (cleanPathMatch) return cleanPathMatch;
-
-          // 3. If navigation is to download page, check /download
-          if (url.pathname.includes('/download')) {
-            const downloadCached = await caches.match('/download');
-            if (downloadCached) return downloadCached;
-          }
-
-          // 4. Fallback to cached root App Shell (Next.js SPA client router will mount)
-          const rootCached = await caches.match('/');
-          if (rootCached) return rootCached;
-
-          // 5. If root is missing, try /download shell
-          const anyDownloadCached = await caches.match('/download');
-          if (anyDownloadCached) return anyDownloadCached;
-
-          // 6. Absolute last resort fallback: Non-blocking 200 OK navigation fallback
-          // NEVER return a 503 error or blocking screen that locks the user out
-          return new Response(
-            `<!DOCTYPE html>
+// Resilient Offline HTML Response when no cache exists
+function getOfflineFallbackHtml() {
+  return new Response(
+    `<!DOCTYPE html>
 <html lang="id">
 <head>
   <meta charset="utf-8">
-  <title>PMUSIC</title>
+  <title>MusicFY - Offline</title>
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <style>
     body { background: #0a0a0a; color: #fff; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif; display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; padding: 20px; box-sizing: border-box; }
@@ -146,7 +70,7 @@ self.addEventListener('fetch', (event) => {
 </head>
 <body>
   <div class="card">
-    <h2>PMUSIC Mode Offline</h2>
+    <h2>MusicFY Mode Offline</h2>
     <p>Koneksi internet tidak tersedia. Anda tetap dapat menikmati seluruh lagu yang telah tersimpan di memori perangkat.</p>
     <div class="links">
       <a href="/download" class="primary">Buka Menu Download</a>
@@ -155,66 +79,107 @@ self.addEventListener('fetch', (event) => {
   </div>
 </body>
 </html>`,
-            {
-              status: 200,
-              headers: { 'Content-Type': 'text/html; charset=utf-8' },
-            }
-          );
-        })
-    );
+    {
+      status: 200,
+      headers: { 'Content-Type': 'text/html; charset=utf-8' },
+    }
+  );
+}
+
+// 3. Fetch Event: Stale-While-Revalidate with strict audio stream exclusion
+self.addEventListener('fetch', (event) => {
+  // Only process standard GET requests
+  if (event.request.method !== 'GET') return;
+
+  const urlString = event.request.url;
+  // Ignore non-http schemes (chrome-extension, blob, data, etc.)
+  if (!urlString || !urlString.startsWith('http')) return;
+
+  let url;
+  try {
+    url = new URL(urlString);
+  } catch {
     return;
   }
 
-  // Static assets (Next.js bundles, styles, icons, fonts): Cache-First with Network Revalidation
-  event.respondWith(
-    caches.match(event.request).then((cachedResponse) => {
-      if (cachedResponse) {
-        // Revalidate in background for future requests
-        fetch(event.request)
-          .then((networkResponse) => {
-            if (
-              networkResponse &&
-              networkResponse.status === 200 &&
-              (networkResponse.type === 'basic' || networkResponse.type === 'cors')
-            ) {
-              const responseClone = networkResponse.clone();
-              caches
-                .open(CACHE_NAME)
-                .then((cache) => {
-                  cache.put(event.request, responseClone).catch(() => {});
-                })
-                .catch(() => {});
-            }
-          })
-          .catch(() => {});
-        return cachedResponse;
-      }
+  // --------------------------------------------------------------------------
+  // STRICT EXCLUSIONS (Do NOT intercept or cache):
+  // 1. Next.js internal chunks, dynamic code splits, and RSC route payloads
+  // 2. Streaming backend audio endpoints (/api/stream, /api/audio, /api/download)
+  // 3. Dynamic API data routes (/api/)
+  // 4. HTTP Range requests (crucial for chunked audio buffer & seek stability)
+  // 5. Hot Module Replacement & Next.js fast refresh (dev)
+  // 6. External streaming & telemetry domains
+  // --------------------------------------------------------------------------
+  const isRSC =
+    url.searchParams.has('_rsc') ||
+    event.request.headers.get('RSC') === '1' ||
+    event.request.headers.get('Next-Router-State-Tree') ||
+    event.request.headers.get('Next-Router-Prefetch') ||
+    event.request.headers.get('Next-Url');
 
-      return fetch(event.request)
-        .then((networkResponse) => {
+  if (
+    url.pathname.startsWith('/api/') ||
+    url.pathname.startsWith('/_next/') ||
+    isRSC ||
+    event.request.headers.has('range') ||
+    url.pathname.includes('/_next/webpack-hmr') ||
+    url.hostname.includes('youtube.com') ||
+    url.hostname.includes('youtube-nocookie.com') ||
+    url.hostname.includes('googlevideo.com') ||
+    url.hostname.includes('ytimg.com') ||
+    url.hostname.includes('ggpht.com') ||
+    url.hostname.includes('mzstatic.com') ||
+    url.hostname.includes('itunes.apple.com') ||
+    url.hostname.includes('doubleclick.net')
+  ) {
+    // Let browser perform direct network request without Service Worker interference
+    return;
+  }
+
+  // --------------------------------------------------------------------------
+  // STALE-WHILE-REVALIDATE STRATEGY FOR STANDALONE APP SHELL:
+  // --------------------------------------------------------------------------
+  event.respondWith(
+    (async () => {
+      const cache = await caches.open(CACHE_NAME);
+
+      // Only match cache for exact request
+      const cachedResponse = await cache.match(event.request);
+
+      // Background network revalidation
+      const networkFetchPromise = fetch(event.request)
+        .then(async (networkResponse) => {
           if (
             networkResponse &&
             networkResponse.status === 200 &&
             (networkResponse.type === 'basic' || networkResponse.type === 'cors')
           ) {
-            const responseClone = networkResponse.clone();
-            caches
-              .open(CACHE_NAME)
-              .then((cache) => {
-                cache.put(event.request, responseClone).catch(() => {});
-              })
-              .catch(() => {});
+            const responseToCache = networkResponse.clone();
+            cache.put(event.request, responseToCache).catch(() => {});
           }
           return networkResponse;
         })
-        .catch(async () => {
-          // If search parameters exist (e.g. Next.js _rsc), try matching without search params
-          if (url.search) {
-            const cleanMatch = await caches.match(url.pathname);
-            if (cleanMatch) return cleanMatch;
-          }
-          return new Response('', { status: 408 });
-        });
-    })
+        .catch(() => null);
+
+      if (cachedResponse) {
+        event.waitUntil(networkFetchPromise);
+        return cachedResponse;
+      }
+
+      const freshNetworkResponse = await networkFetchPromise;
+      if (freshNetworkResponse) {
+        return freshNetworkResponse;
+      }
+
+      // Offline Fallback ONLY for full HTML document navigation
+      if (event.request.mode === 'navigate') {
+        const rootCached = await cache.match('/');
+        if (rootCached) return rootCached;
+        return getOfflineFallbackHtml();
+      }
+
+      return new Response('', { status: 404, statusText: 'Offline Asset Unavailable' });
+    })()
   );
 });

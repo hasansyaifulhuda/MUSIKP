@@ -74,7 +74,7 @@ export function OfflineIndicator() {
         <aside
           role="status"
           aria-live="polite"
-          className="fixed top-5 left-1/2 -translate-x-1/2 z-[130] pointer-events-none select-none max-w-[90vw]"
+          className="fixed top-5 left-1/2 -translate-x-1/2 z-[250] pointer-events-none select-none max-w-[90vw]"
         >
           <motion.div
             key={toast.id}

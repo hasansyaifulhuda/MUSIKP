@@ -3,13 +3,15 @@
 import { useState, useEffect, useCallback } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
-import { ArrowLeft, DownloadCloud, Play, Trash2, CheckCircle2, Music } from 'lucide-react';
+import { ArrowLeft, DownloadCloud, Play, Shuffle, Trash2, CheckCircle2, Music } from 'lucide-react';
 import { db, OfflineTrack } from '@/lib/db';
 import { Track } from '@/lib/store';
 import { useMusic } from '@/context/MusicContext';
 import { getHighResImage } from '@/lib/utils';
 import { toast } from '@/lib/toast';
 import { MarqueeText } from '@/components/MarqueeText';
+import { Equalizer } from '@/components/Equalizer';
+import { VirtualTrackList } from '@/components/VirtualTrackList';
 
 export default function DownloadPage() {
   const router = useRouter();
@@ -31,16 +33,22 @@ export default function DownloadPage() {
   }, []);
 
   useEffect(() => {
+    let mounted = true;
     loadOfflineTracks();
 
     const handleFocusSync = () => {
       db.getOfflineTracks()
-        .then((data) => setOfflineTracks([...data].reverse()))
+        .then((data) => {
+          if (mounted) setOfflineTracks([...data].reverse());
+        })
         .catch(() => {});
     };
 
     window.addEventListener('focus', handleFocusSync);
-    return () => window.removeEventListener('focus', handleFocusSync);
+    return () => {
+      mounted = false;
+      window.removeEventListener('focus', handleFocusSync);
+    };
   }, [loadOfflineTracks]);
 
   const handlePlayAll = () => {
@@ -49,6 +57,20 @@ export default function DownloadPage() {
     if (tracks.length > 0) {
       playTrack(tracks[0], tracks, 'playlist');
       toast.success(`Memutar ${tracks.length} lagu offline`);
+    }
+  };
+
+  const handleShufflePlay = () => {
+    if (offlineTracks.length === 0) return;
+    const tracks: Track[] = offlineTracks.map((item) => item.track).filter(Boolean);
+    if (tracks.length > 0) {
+      const shuffled = [...tracks];
+      for (let i = shuffled.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
+      }
+      playTrack(shuffled[0], shuffled, 'playlist');
+      toast.success(`Memutar acak ${shuffled.length} lagu offline`);
     }
   };
 
@@ -108,7 +130,7 @@ export default function DownloadPage() {
         </div>
 
         {offlineTracks.length > 0 && (
-          <div className="flex items-center gap-3">
+          <div className="flex items-center gap-2 sm:gap-3">
             <button
               onClick={handleClearAll}
               className="text-xs text-white/60 hover:text-red-400 p-2 transition-colors cursor-pointer"
@@ -117,8 +139,15 @@ export default function DownloadPage() {
               <Trash2 className="w-5 h-5" />
             </button>
             <button
+              onClick={handleShufflePlay}
+              className="w-9 h-9 sm:w-10 sm:h-10 bg-white/10 hover:bg-white/20 text-white rounded-full flex items-center justify-center transition-all active:scale-95 cursor-pointer"
+              title="Putar Acak Lagu Offline"
+            >
+              <Shuffle className="w-4 h-4" />
+            </button>
+            <button
               onClick={handlePlayAll}
-              className="flex items-center gap-2 px-5 py-2.5 bg-[#1DB954] hover:bg-[#1ed760] text-black font-bold text-xs md:text-sm rounded-full shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer"
+              className="flex items-center gap-2 px-4 sm:px-5 py-2 sm:py-2.5 bg-[#1DB954] hover:bg-[#1ed760] text-black font-bold text-xs md:text-sm rounded-full shadow-lg hover:scale-105 active:scale-95 transition-all cursor-pointer"
             >
               <Play className="w-4 h-4 fill-current" />
               <span>Putar Semua</span>
@@ -140,9 +169,10 @@ export default function DownloadPage() {
             Belum ada lagu yang diunduh. Lagu yang disimpan saat online akan muncul di sini.
           </div>
         ) : (
-          <div className="space-y-1">
-            {offlineTracks.map((item, index) => {
-              const track = item.track;
+          <VirtualTrackList
+            tracks={offlineTracks.map((item) => item.track)}
+            queue={offlineTracks.map((item) => item.track)}
+            renderItem={(track, index) => {
               const isCurrent = currentTrack?.videoId === track.videoId;
               const thumb = getHighResImage(track.thumbnails?.[track.thumbnails.length - 1]?.url, 120);
               const artistName = Array.isArray(track.artist)
@@ -151,7 +181,7 @@ export default function DownloadPage() {
 
               return (
                 <div
-                  key={track.videoId + index}
+                  key={track.videoId ? `${track.videoId}-${index}` : index}
                   onClick={() => {
                     const allTracks = offlineTracks.map((t) => t.track);
                     playTrack(track, allTracks, 'playlist', index);
@@ -162,18 +192,23 @@ export default function DownloadPage() {
                 >
                   <div className="w-6 text-center text-xs text-[#b3b3b3] group-hover:text-white font-mono shrink-0">
                     {isCurrent && isPlaying ? (
-                      <div className="flex gap-0.5 items-end h-3 justify-center">
-                        <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_0ms]" />
-                        <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_200ms]" />
-                        <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_400ms]" />
-                      </div>
+                      <Equalizer size="sm" />
                     ) : (
                       index + 1
                     )}
                   </div>
 
                   <div className="relative w-12 h-12 md:w-14 md:h-14 rounded-lg overflow-hidden shrink-0 shadow bg-black/40">
-                    <Image src={thumb} alt={track.name} fill sizes="56px" className="object-cover" />
+                    <Image
+                      src={thumb}
+                      alt={track.name}
+                      fill
+                      sizes="56px"
+                      priority={index < 4}
+                      loading={index < 4 ? undefined : 'lazy'}
+                      decoding="async"
+                      className="object-cover"
+                    />
                     <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-[#1DB954] flex items-center justify-center shadow">
                       <CheckCircle2 className="w-3 h-3 text-black stroke-[3]" />
                     </div>
@@ -202,8 +237,8 @@ export default function DownloadPage() {
                   </button>
                 </div>
               );
-            })}
-          </div>
+            }}
+          />
         )}
       </div>
     </main>

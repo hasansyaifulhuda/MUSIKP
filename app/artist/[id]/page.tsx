@@ -80,7 +80,7 @@ export default function ArtistPage() {
     if (typeof navigator !== 'undefined' && navigator.share) {
       try {
         await navigator.share({
-          title: artist?.name || 'Artis PMUSIC',
+          title: artist?.name || 'Artis MusicFY',
           url: window.location.href,
         });
         return;
@@ -225,6 +225,8 @@ export default function ArtistPage() {
                       alt={album.name}
                       fill
                       sizes="176px"
+                      loading="lazy"
+                      decoding="async"
                       className="object-cover"
                     />
                     <div className="absolute right-2 bottom-2 w-10 h-10 rounded-full bg-[#1DB954] text-black flex items-center justify-center opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 transition-all duration-200 shadow-xl">
@@ -256,6 +258,8 @@ export default function ArtistPage() {
                       alt={single.name}
                       fill
                       sizes="176px"
+                      loading="lazy"
+                      decoding="async"
                       className="object-cover"
                     />
                     <div className="absolute right-2 bottom-2 w-10 h-10 rounded-full bg-[#1DB954] text-black flex items-center justify-center opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 transition-all duration-200 shadow-xl">

@@ -10,9 +10,10 @@ import { useRouter } from 'next/navigation';
 interface HorizontalScrollProps {
   title: string;
   tracks: Track[];
+  isFirstShelf?: boolean;
 }
 
-export const HorizontalScroll = memo(function HorizontalScroll({ title, tracks }: HorizontalScrollProps) {
+export const HorizontalScroll = memo(function HorizontalScroll({ title, tracks, isFirstShelf = false }: HorizontalScrollProps) {
   const playTrack = usePlayerStore((state) => state.playTrack);
   const router = useRouter();
 
@@ -57,7 +58,14 @@ export const HorizontalScroll = memo(function HorizontalScroll({ title, tracks }
         <div className="flex items-center gap-3">
           {headerImage && (
             <div className="w-11 h-11 rounded-full overflow-hidden relative shrink-0 shadow-md">
-              <Image src={headerImage} alt={mainTitle} fill className="object-cover" />
+              <Image
+                src={headerImage}
+                alt={mainTitle}
+                fill
+                loading="lazy"
+                decoding="async"
+                className="object-cover"
+              />
             </div>
           )}
           <div className="flex flex-col justify-center">
@@ -87,7 +95,7 @@ export const HorizontalScroll = memo(function HorizontalScroll({ title, tracks }
           return (
             <div
               key={`${track.videoId}-${i}`}
-              className="flex-none w-36 md:w-44 p-3 bg-[#181818]/60 hover:bg-[#282828] rounded-md cursor-pointer group snap-start transition-colors duration-200 select-none shadow-sm flex flex-col gpu-accelerated"
+              className="flex-none w-36 md:w-44 p-3 bg-[#181818]/60 hover:bg-[#282828] rounded-md cursor-pointer group snap-start transition-colors duration-200 select-none shadow-sm flex flex-col gpu-accelerated content-auto"
               onClick={() => playTrack(track, tracks, 'playlist', i)}
             >
               <div className="relative w-full aspect-square rounded-[4px] overflow-hidden mb-3 shadow-md bg-black/40">
@@ -96,7 +104,9 @@ export const HorizontalScroll = memo(function HorizontalScroll({ title, tracks }
                   alt={track.name}
                   fill
                   sizes="(max-width: 768px) 144px, 176px"
-                  loading="lazy"
+                  priority={isFirstShelf && i < 4}
+                  loading={isFirstShelf && i < 4 ? undefined : 'lazy'}
+                  decoding="async"
                   className="object-cover"
                 />
                 {/* Floating PMUSIC Green Play Button */}

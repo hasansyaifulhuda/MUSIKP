@@ -2,21 +2,22 @@ import type { Metadata, Viewport } from 'next';
 import './globals.css';
 import { BottomNav } from '@/components/BottomNav';
 import { Sidebar } from '@/components/Sidebar';
-import { Player } from '@/components/Player';
+import { ClientPlayer } from '@/components/ClientPlayer';
 import { BackgroundProvider } from '@/components/BackgroundProvider';
 import { MusicProvider } from '@/context/MusicContext';
 import { ErrorBoundary } from '@/components/ErrorBoundary';
+import { RouteContainer } from '@/components/RouteContainer';
 import { ClientModals } from '@/components/ClientModals';
 
 export const metadata: Metadata = {
-  title: 'PMUSIC',
-  description: 'PMUSIC - Your Ultimate Music Player: dengarkan jutaan lagu dan podcast gratis di platform streaming musik modern.',
+  title: 'MusicFY - Pemutar Musik',
+  description: 'MusicFY - Pemutar Musik: dengarkan jutaan lagu dan podcast gratis di platform streaming musik modern.',
   manifest: '/manifest.json',
   referrer: 'no-referrer',
   appleWebApp: {
     capable: true,
     statusBarStyle: 'black-translucent',
-    title: 'PMUSIC',
+    title: 'MusicFY',
   },
   icons: {
     icon: '/icon.png',
@@ -36,6 +37,11 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
   return (
     <html lang="id" className="dark" data-scroll-behavior="smooth">
       <head>
+        {/* Resource Hints & DNS Prefetching to eliminate DNS lookup latency */}
+        <link rel="preconnect" href="https://shanz.my.id" crossOrigin="anonymous" />
+        <link rel="dns-prefetch" href="https://shanz.my.id" />
+        <link rel="preconnect" href="https://i.ytimg.com" crossOrigin="anonymous" />
+        <link rel="dns-prefetch" href="https://i.ytimg.com" />
         <meta name="referrer" content="no-referrer" />
         <script
           dangerouslySetInnerHTML={{
@@ -121,16 +127,16 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
 
           {/* Main Content Viewport */}
           <div className="md:pl-64 lg:pl-72 md:p-2 min-h-screen">
-            <div className="min-h-[calc(100vh-16px)] bg-[#121212] md:rounded-lg overflow-hidden pb-28 md:pb-32 border border-transparent md:border-white/[0.04] shadow-2xl relative">
-              <ErrorBoundary name="MainView">
+            <div className="min-h-[calc(100vh-16px)] bg-[#121212] md:rounded-lg overflow-hidden pb-28 md:pb-32 border border-transparent md:border-white/[0.04] shadow-2xl relative gpu-accelerated contain-paint">
+              <RouteContainer>
                 {children}
-              </ErrorBoundary>
+              </RouteContainer>
             </div>
           </div>
 
           {/* Audio Engine & Interactive Player */}
           <ErrorBoundary name="PlayerView">
-            <Player />
+            <ClientPlayer />
           </ErrorBoundary>
 
           {/* Mobile Bottom Navigation Bar */}

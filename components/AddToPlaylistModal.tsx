@@ -30,29 +30,29 @@ export function AddToPlaylistModal() {
   };
 
   useEffect(() => {
+    let mounted = true;
     if (trackToAdd) {
-      loadPlaylists();
+      db.getPlaylists()
+        .then((data) => {
+          if (mounted) {
+            setPlaylists(data as Playlist[]);
+          }
+        })
+        .catch(() => {});
     }
+    return () => {
+      mounted = false;
+    };
   }, [trackToAdd]);
 
   const handleAddToPlaylist = async (playlist: Playlist) => {
     if (!trackToAdd) return;
-
-    // Check if track already exists
-    const currentTracks = playlist.tracks || [];
-    if (currentTracks.some((t) => t.videoId === trackToAdd.videoId)) {
+    const ok = await db.addSongToPlaylist(playlist.id, trackToAdd);
+    if (ok) {
+      toast.success(`Ditambahkan ke playlist "${playlist.name}"`);
+    } else {
       toast.info('Lagu sudah ada di dalam playlist ini');
-      setTrackToAdd(null);
-      return;
     }
-
-    const updatedPlaylist = {
-      ...playlist,
-      tracks: [...currentTracks, trackToAdd],
-    };
-
-    await db.addPlaylist(updatedPlaylist);
-    toast.success(`Ditambahkan ke playlist "${playlist.name}"`);
     setTrackToAdd(null);
   };
 
@@ -60,15 +60,11 @@ export function AddToPlaylistModal() {
     if (!newPlaylistName.trim() || !trackToAdd) return;
 
     const trimmedName = newPlaylistName.trim();
-    const newPlaylist: Playlist = {
-      id: Date.now().toString(),
-      name: trimmedName,
-      img: getHighResImage(trackToAdd.thumbnails?.[trackToAdd.thumbnails.length - 1]?.url, 400),
-      tracks: [trackToAdd],
-    };
-
-    await db.addPlaylist(newPlaylist);
-    toast.success(`Playlist "${trimmedName}" berhasil dibuat`);
+    const coverUrl = getHighResImage(trackToAdd.thumbnails?.[trackToAdd.thumbnails.length - 1]?.url, 400);
+    const created = await db.createPlaylist(trimmedName, coverUrl, [trackToAdd]);
+    if (created) {
+      toast.success(`Playlist "${trimmedName}" berhasil dibuat`);
+    }
     setNewPlaylistName('');
     setIsCreating(false);
     setTrackToAdd(null);
@@ -78,11 +74,14 @@ export function AddToPlaylistModal() {
 
   return (
     <div
-      className="fixed inset-0 z-50 flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-4 sm:p-0"
+      role="dialog"
+      aria-modal="true"
+      aria-label="Tambahkan ke Playlist"
+      className="fixed inset-0 z-[150] flex items-end sm:items-center justify-center bg-black/70 backdrop-blur-sm p-4 sm:p-0"
       onClick={() => setTrackToAdd(null)}
     >
       <div
-        className="bg-[#242424] w-full sm:w-[420px] max-h-[80vh] rounded-t-2xl sm:rounded-2xl flex flex-col overflow-hidden shadow-2xl border border-white/10"
+        className="bg-[#242424] w-full sm:w-[420px] max-h-[80vh] rounded-t-2xl sm:rounded-2xl flex flex-col overflow-hidden shadow-2xl border border-white/10 transform-gpu"
         onClick={(e) => e.stopPropagation()}
       >
         <div className="flex items-center justify-between p-4 border-b border-white/10">
@@ -101,6 +100,8 @@ export function AddToPlaylistModal() {
               src={getHighResImage(trackToAdd.thumbnails?.[trackToAdd.thumbnails.length - 1]?.url, 200)}
               alt={trackToAdd.name}
               fill
+              loading="lazy"
+              decoding="async"
               className="object-cover"
             />
           </div>
@@ -167,7 +168,14 @@ export function AddToPlaylistModal() {
                   >
                     <div className="relative w-12 h-12 bg-white/5 rounded-lg overflow-hidden flex items-center justify-center shrink-0 shadow">
                       {playlist.img ? (
-                        <Image src={playlist.img} alt={playlist.name} fill className="object-cover" />
+                        <Image
+                          src={playlist.img}
+                          alt={playlist.name}
+                          fill
+                          loading="lazy"
+                          decoding="async"
+                          className="object-cover"
+                        />
                       ) : (
                         <Music className="w-6 h-6 text-white/40" />
                       )}

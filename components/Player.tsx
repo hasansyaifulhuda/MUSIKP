@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { usePlayerStore, Track } from '@/lib/store';
 import { db } from '@/lib/db';
 import { motion, AnimatePresence } from 'motion/react';
@@ -29,6 +29,10 @@ import {
   Sparkles,
   RotateCcw,
   Loader2,
+  Moon,
+  SlidersHorizontal,
+  ChevronUp,
+  ExternalLink,
 } from 'lucide-react';
 import { cn, getHighResImage } from '@/lib/utils';
 import Image from 'next/image';
@@ -36,13 +40,28 @@ import { useRouter } from 'next/navigation';
 import { MarqueeText } from './MarqueeText';
 import { toast } from '@/lib/toast';
 import { LyricLine, normalizeLyrics } from '@/lib/performance';
+import { lyricsWorkerClient } from '@/lib/lyricsWorkerClient';
+import {
+  getFastCachedLyrics,
+  getDeepCachedLyrics,
+  saveAllCachedLyrics,
+  clearAllCachedLyrics,
+} from '@/lib/lyricsCache';
 import { useMusic } from '@/context/MusicContext';
+import { AudioVisualizer } from './AudioVisualizer';
+import { FullScreenLyrics } from './FullScreenLyrics';
+import { FloatingLyricsPill } from './FloatingLyricsPill';
+import { useSleepTimerStore } from '@/lib/sleepTimerStore';
+import { useEqualizerStore } from '@/lib/audioEffects';
+import { useFloatingWidgetStore } from '@/lib/floatingWidgetStore';
+import { deduplicatedFetch } from '@/lib/clientDeduplication';
 import {
   MiniPlayerProgressBar,
   DesktopScrubber,
   ExpandedScrubber,
   LyricsViewContainer,
 } from './PlayerScrubber';
+import { ComponentErrorBoundary } from './ComponentErrorBoundary';
 
 export function Player() {
   const router = useRouter();
@@ -65,6 +84,16 @@ export function Player() {
   const removeFromQueue = usePlayerStore((state) => state.removeFromQueue);
   const setTrackToAdd = usePlayerStore((state) => state.setTrackToAdd);
 
+  // Sleep Timer & Equalizer Store State
+  const isSleepTimerActive = useSleepTimerStore((state) => state.isActive);
+  const openSleepTimerModal = useSleepTimerStore((state) => state.openModal);
+  const isEqualizerEnabled = useEqualizerStore((state) => state.isEnabled);
+  const openEqualizerModal = useEqualizerStore((state) => state.openModal);
+
+  // Floating Widget & Full-Screen Lyrics State (Batch 2)
+  const openFloatingWidget = useFloatingWidgetStore((state) => state.openWidget);
+  const [isFullScreenLyricsOpen, setIsFullScreenLyricsOpen] = useState(false);
+
   // Music Context (Interruption-Aware Playback, Audio Focus, Seek, Volume & Liked Songs)
   const {
     togglePlay,
@@ -72,6 +101,7 @@ export function Player() {
     playNext,
     playPrev,
     playQueueIndex,
+    moveQueueItem,
     toggleShuffle,
     toggleRepeat,
     clearQueue,
@@ -113,44 +143,88 @@ export function Player() {
 
   const currentVideoId = currentTrack?.videoId;
   const currentTrackName = currentTrack?.name;
-  const currentArtistName = Array.isArray(currentTrack?.artist)
-    ? currentTrack.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(' ')
-    : currentTrack?.artist?.name || '';
+  const currentArtistName = useMemo(() => {
+    if (!currentTrack) return '';
+    if (typeof (currentTrack as any).artistName === 'string') {
+      return (currentTrack as any).artistName;
+    }
+    const rawArtist = currentTrack.artist;
+    if (typeof rawArtist === 'string') return rawArtist;
+    if (Array.isArray(rawArtist)) {
+      return rawArtist
+        .map((a: any) => (typeof a === 'string' ? a : a?.name || ''))
+        .filter(Boolean)
+        .join(', ');
+    }
+    if (typeof rawArtist === 'object' && rawArtist !== null) {
+      return (rawArtist as any).name || '';
+    }
+    return '';
+  }, [currentTrack]);
   const currentTrackDuration = currentTrack?.duration;
 
-  // 2. Fetch Synchronized Lyrics (IndexedDB First with Network Fallback)
+  const [lyricsRetryCount, setLyricsRetryCount] = useState(0);
+
+  // Listen to manual lyrics retry/reload events from LyricsView & FullScreenLyrics
+  useEffect(() => {
+    const handleReload = () => {
+      if (currentVideoId) {
+        clearAllCachedLyrics(currentVideoId).catch(() => {});
+      }
+      setLyricsRetryCount((prev) => prev + 1);
+    };
+    window.addEventListener('musicfy:reload-lyrics', handleReload);
+    window.addEventListener('pmusic:reload-lyrics', handleReload);
+    return () => {
+      window.removeEventListener('musicfy:reload-lyrics', handleReload);
+      window.removeEventListener('pmusic:reload-lyrics', handleReload);
+    };
+  }, [currentVideoId]);
+
+  // 2. Fetch Synchronized Lyrics (Multi-Tier Caching + Strict 3.8s AbortController Timeout)
   useEffect(() => {
     if (!currentVideoId) {
       setLyrics([]);
       setIsSyncedLyrics(false);
+      setIsLyricsLoading(false);
       return;
+    }
+
+    // 1. TIER 0 & TIER 1: INSTANT SYNCHRONOUS CACHE (In-Memory Map & localStorage)
+    // Instant 0ms display on replay or page refresh without spinner or network hit
+    if (lyricsRetryCount === 0) {
+      const fastHit = getFastCachedLyrics(currentVideoId);
+      if (fastHit && Array.isArray(fastHit.lyrics) && fastHit.lyrics.length > 0) {
+        setLyrics(fastHit.lyrics);
+        setIsSyncedLyrics(Boolean(fastHit.synced));
+        setIsLyricsLoading(false);
+        return; // Instant 0ms Cache Hit!
+      }
     }
 
     let isCancelled = false;
     setIsLyricsLoading(true);
 
+    const controller = new AbortController();
+    let timeoutId: NodeJS.Timeout | null = null;
+
     const loadLyricsForCurrentTrack = async () => {
-      // 1. CHECK INDEXEDDB FIRST:
-      // If track is downloaded or saved offline, load lyrics directly from IndexedDB without network fetch
-      try {
-        const offlineItem = await db.getOfflineTrack(currentVideoId);
-        if (
-          offlineItem &&
-          Array.isArray(offlineItem.lyrics) &&
-          offlineItem.lyrics.length > 0
-        ) {
-          if (!isCancelled) {
-            setLyrics(offlineItem.lyrics);
-            setIsSyncedLyrics(Boolean(offlineItem.isSyncedLyrics ?? offlineItem.synced));
-            setIsLyricsLoading(false);
+      // 2. TIER 2: ASYNC INDEXEDDB DEEP CACHE (Offline Track + Compressed Metadata Cache)
+      if (lyricsRetryCount === 0) {
+        try {
+          const deepHit = await getDeepCachedLyrics(currentVideoId);
+          if (deepHit && Array.isArray(deepHit.lyrics) && deepHit.lyrics.length > 0) {
+            if (!isCancelled) {
+              setLyrics(deepHit.lyrics);
+              setIsSyncedLyrics(Boolean(deepHit.synced));
+              setIsLyricsLoading(false);
+            }
+            return; // Found in IndexedDB!
           }
-          return; // 100% Offline from IndexedDB! No network fetch needed.
-        }
-      } catch (err) {
-        console.warn('[PlayerLyrics] Error checking IndexedDB for offline lyrics:', err);
+        } catch {}
       }
 
-      // 2. IF DEVICE IS OFFLINE: Do NOT make a network request to /api/lyrics
+      // 3. IF DEVICE IS OFFLINE: Do NOT make a network request to /api/lyrics
       if (typeof navigator !== 'undefined' && !navigator.onLine) {
         if (!isCancelled) {
           setLyrics([]);
@@ -160,50 +234,95 @@ export function Player() {
         return;
       }
 
-      // 3. ONLINE FALLBACK: Fetch from API with timeout protection
-      const controller = new AbortController();
-      const timeoutId = setTimeout(() => {
+      // 4. TIER 3: NON-BLOCKING BACKGROUND FETCH WITH SILENT 3.2s TIMEOUT
+      timeoutId = setTimeout(() => {
         try {
-          controller.abort();
+          controller.abort('LYRICS_TIMEOUT');
         } catch {}
-      }, 4000);
+      }, 3200);
 
       const dur = Math.round(duration || currentTrackDuration || 200);
       const url = `/api/lyrics?id=${encodeURIComponent(currentVideoId)}&title=${encodeURIComponent(
         currentTrackName || ''
-      )}&artist=${encodeURIComponent(currentArtistName)}&duration=${dur}`;
+      )}&artist=${encodeURIComponent(currentArtistName)}&duration=${dur}${lyricsRetryCount > 0 ? '&force=true' : ''}`;
 
       try {
-        const res = await fetch(url, { signal: controller.signal });
-        const data = res.ok ? await res.json() : { synced: false, lyrics: [] };
-        if (!isCancelled) {
+        const response = await fetch(url, { signal: controller.signal });
+        if (response.ok) {
+          const data = await response.json();
           const payload = data?.result !== undefined ? data.result : data;
-          if (Array.isArray(payload?.lyrics) && payload.lyrics.length > 0) {
-            const cleanLyrics = normalizeLyrics(payload.lyrics, dur);
-            setLyrics(cleanLyrics);
-            setIsSyncedLyrics(Boolean(payload.synced));
-          } else {
+          if (!isCancelled) {
+            if (Array.isArray(payload?.lyrics) && payload.lyrics.length > 0) {
+              const cleanLyrics = await lyricsWorkerClient.normalize(payload.lyrics, dur);
+              const syncedVal = Boolean(payload.synced);
+              setLyrics(cleanLyrics);
+              setIsSyncedLyrics(syncedVal);
+
+              // Simpan ke seluruh tier cache (In-Memory Map + LocalStorage + IndexedDB)
+              saveAllCachedLyrics(currentVideoId, cleanLyrics, syncedVal, payload.provider).catch(() => {});
+
+              // Update offline track item jika lagu sudah tersimpan offline
+              try {
+                const offItem = await db.getOfflineTrack(currentVideoId);
+                if (offItem) {
+                  offItem.lyrics = cleanLyrics;
+                  offItem.isSyncedLyrics = syncedVal;
+                  offItem.synced = syncedVal;
+                  await db.saveOfflineTrack(offItem.track, offItem.blob, { lyrics: cleanLyrics, synced: syncedVal });
+                }
+              } catch {}
+
+              if (lyricsRetryCount > 0) {
+                toast.success('Lirik berhasil ditemukan!');
+              }
+            } else {
+              setLyrics([]);
+              setIsSyncedLyrics(false);
+              if (lyricsRetryCount > 0) {
+                toast.info('Lirik belum tersedia untuk lagu ini.');
+              }
+            }
+          }
+        } else {
+          if (!isCancelled) {
             setLyrics([]);
             setIsSyncedLyrics(false);
           }
         }
-      } catch {
+      } catch (err: any) {
         if (!isCancelled) {
+          // 100% Non-blocking silent fallback without freezing player UI
           setLyrics([]);
           setIsSyncedLyrics(false);
+          if (lyricsRetryCount > 0 && err !== 'LYRICS_TIMEOUT' && err?.name !== 'AbortError') {
+            toast.info('Pencarian lirik memakan waktu terlalu lama. Silakan coba sesaat lagi.');
+          }
         }
       } finally {
-        clearTimeout(timeoutId);
+        if (timeoutId) clearTimeout(timeoutId);
         if (!isCancelled) setIsLyricsLoading(false);
       }
     };
 
-    loadLyricsForCurrentTrack();
+    // Execute in background via requestIdleCallback to guarantee zero-lag on UI thread
+    const idleId: any =
+      typeof window !== 'undefined' && 'requestIdleCallback' in window
+        ? (window as any).requestIdleCallback(() => loadLyricsForCurrentTrack(), { timeout: 200 })
+        : setTimeout(() => loadLyricsForCurrentTrack(), 16);
 
     return () => {
       isCancelled = true;
+      if (timeoutId) clearTimeout(timeoutId);
+      if (typeof window !== 'undefined' && 'cancelIdleCallback' in window && typeof idleId === 'number') {
+        (window as any).cancelIdleCallback(idleId);
+      } else if (idleId) {
+        clearTimeout(idleId);
+      }
+      try {
+        controller.abort();
+      } catch {}
     };
-  }, [currentVideoId, currentTrackName, currentArtistName, currentTrackDuration, duration]);
+  }, [currentVideoId, currentTrackName, currentArtistName, currentTrackDuration, duration, lyricsRetryCount]);
 
   // 3. Toggle Like Song
   const handleLike = useCallback(
@@ -266,7 +385,15 @@ export function Player() {
           if (lyrics.length > 0 && currentVideoId === trackToProcess.videoId) {
             lyricsToPersist = lyrics;
             syncedToPersist = isSyncedLyrics;
-          } else if (typeof navigator !== 'undefined' && navigator.onLine) {
+          } else {
+            const cachedLyrics = getFastCachedLyrics(trackToProcess.videoId);
+            if (cachedLyrics && cachedLyrics.lyrics.length > 0) {
+              lyricsToPersist = cachedLyrics.lyrics;
+              syncedToPersist = cachedLyrics.synced;
+            }
+          }
+
+          if (lyricsToPersist.length === 0 && typeof navigator !== 'undefined' && navigator.onLine) {
             // Otherwise, fetch lyrics from API with safe timeout
             try {
               const dur = Math.round(duration || trackToProcess.duration || 200);
@@ -279,7 +406,7 @@ export function Player() {
                 try {
                   lyricsController.abort();
                 } catch {}
-              }, 6000);
+              }, 4000);
 
               const res = await fetch(lyricsUrl, { signal: lyricsController.signal });
               clearTimeout(lyricsTimeout);
@@ -287,8 +414,9 @@ export function Player() {
                 const data = await res.json();
                 const payload = data?.result !== undefined ? data.result : data;
                 if (Array.isArray(payload?.lyrics) && payload.lyrics.length > 0) {
-                  lyricsToPersist = normalizeLyrics(payload.lyrics, dur);
+                  lyricsToPersist = await lyricsWorkerClient.normalize(payload.lyrics, dur);
                   syncedToPersist = Boolean(payload.synced);
+                  saveAllCachedLyrics(trackToProcess.videoId, lyricsToPersist, syncedToPersist, payload.provider).catch(() => {});
                   // Update player state if this track is currently active
                   if (currentVideoId === trackToProcess.videoId) {
                     setLyrics(lyricsToPersist);
@@ -362,6 +490,52 @@ export function Player() {
     [seekTo, isPlaying, setPlaying]
   );
 
+  // Poin 84: Mini-Player Touch Gestures (Swipe left: Next, Swipe right: Prev, Swipe up: Expand)
+  const miniTouchStartRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const didSwipeRef = useRef<boolean>(false);
+
+  const handleMiniTouchStart = useCallback((e: React.TouchEvent) => {
+    const t = e.touches[0];
+    if (!t) return;
+    miniTouchStartRef.current = { x: t.clientX, y: t.clientY };
+    didSwipeRef.current = false;
+  }, []);
+
+  const handleMiniTouchEnd = useCallback(
+    (e: React.TouchEvent) => {
+      const t = e.changedTouches[0];
+      if (!t) return;
+      const dx = t.clientX - miniTouchStartRef.current.x;
+      const dy = t.clientY - miniTouchStartRef.current.y;
+
+      if (Math.abs(dx) > 45 && Math.abs(dx) > Math.abs(dy)) {
+        didSwipeRef.current = true;
+        if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+          navigator.vibrate?.(30);
+        }
+        if (dx < 0) {
+          playNext();
+          toast.info('Lagu berikutnya');
+        } else {
+          playPrev();
+          toast.info('Lagu sebelumnya');
+        }
+      } else if (dy < -40 && Math.abs(dy) > Math.abs(dx)) {
+        didSwipeRef.current = true;
+        setExpanded(true);
+      }
+    },
+    [playNext, playPrev, setExpanded]
+  );
+
+  const handleMiniClick = useCallback(() => {
+    if (didSwipeRef.current) {
+      didSwipeRef.current = false;
+      return;
+    }
+    setExpanded(true);
+  }, [setExpanded]);
+
   if (!currentTrack) return null;
 
   const thumbnail = getHighResImage(currentTrack.thumbnails?.[currentTrack.thumbnails.length - 1]?.url, 800);
@@ -383,14 +557,23 @@ export function Player() {
               exit={{ y: 50, opacity: 0 }}
               transition={{ duration: 0.2 }}
               className="fixed bottom-[68px] left-2 right-2 z-50 bg-[#181818]/95 backdrop-blur-xl rounded-xl p-2.5 flex items-center shadow-2xl border border-white/10 cursor-pointer overflow-hidden group select-none gpu-accelerated"
-              onClick={() => setExpanded(true)}
+              onTouchStart={handleMiniTouchStart}
+              onTouchEnd={handleMiniTouchEnd}
+              onClick={handleMiniClick}
             >
               {/* Isolated High-Performance Progress Bar */}
               <MiniPlayerProgressBar />
 
               {/* Cover Art */}
               <div className="relative w-11 h-11 rounded-lg overflow-hidden shrink-0 mr-3 shadow-md bg-black/40">
-                <Image src={thumbnail} alt={currentTrack.name} fill sizes="48px" className="object-cover" />
+                <Image
+                  src={thumbnail}
+                  alt={currentTrack.name}
+                  fill
+                  priority
+                  sizes="48px"
+                  className="object-cover"
+                />
               </div>
 
               {/* Title & Artist */}
@@ -436,7 +619,7 @@ export function Player() {
       {/* 2. DESKTOP BOTTOM PLAYER BAR (PMUSIC Symmetrical 3-Column Bar)   */}
       {/* ========================================================================= */}
       <footer
-        className="hidden md:flex fixed bottom-0 left-0 right-0 h-24 z-50 bg-[#181818] border-t border-[#282828] px-4 items-center justify-between select-none"
+        className="hidden md:flex fixed bottom-0 left-0 right-0 h-24 z-50 bg-[#181818] border-t border-[#282828] px-4 items-center justify-between select-none gpu-accelerated contain-paint"
         style={{ boxShadow: '0 -4px 24px rgba(0,0,0,0.8)' }}
       >
         {/* LEFT COLUMN: Track Details, Like, Add & Download */}
@@ -445,7 +628,14 @@ export function Player() {
             className="relative w-14 h-14 rounded-md overflow-hidden shrink-0 shadow-lg cursor-pointer group"
             onClick={() => setExpanded(true)}
           >
-            <Image src={thumbnail} alt={currentTrack.name} fill sizes="56px" className="object-cover" />
+            <Image
+              src={thumbnail}
+              alt={currentTrack.name}
+              fill
+              priority
+              sizes="56px"
+              className="object-cover"
+            />
             <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
               <ChevronDown className="w-6 h-6 rotate-180 text-white" />
             </div>
@@ -574,7 +764,10 @@ export function Player() {
         {/* RIGHT COLUMN: Lyrics, Queue, Volume Slider & Fullscreen Toggle */}
         <div className="flex items-center justify-end w-[30%] min-w-[200px] max-w-[360px] gap-3 text-[#b3b3b3]">
           <button
-            onClick={() => {
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
               setActiveView('lyrics');
               setExpanded(true);
             }}
@@ -588,7 +781,10 @@ export function Player() {
           </button>
 
           <button
-            onClick={() => {
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
               setActiveView('queue');
               setExpanded(true);
             }}
@@ -599,6 +795,44 @@ export function Player() {
             title="Antrean Up Next"
           >
             <ListMusic className="w-5 h-5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              openEqualizerModal();
+            }}
+            className={cn(
+              'relative p-1.5 hover:text-white transition-colors cursor-pointer hidden lg:block',
+              isEqualizerEnabled ? 'text-[#1DB954]' : 'hover:text-white'
+            )}
+            title="Equalizer Suara"
+          >
+            <SlidersHorizontal className="w-5 h-5" />
+            {isEqualizerEnabled && (
+              <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
+            )}
+          </button>
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              openSleepTimerModal();
+            }}
+            className={cn(
+              'relative p-1.5 hover:text-white transition-colors cursor-pointer hidden lg:block',
+              isSleepTimerActive ? 'text-[#1DB954]' : 'hover:text-white'
+            )}
+            title="Pengatur Waktu Tidur"
+          >
+            <Moon className="w-5 h-5" />
+            {isSleepTimerActive && (
+              <span className="absolute top-1 right-1 w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
+            )}
           </button>
 
           {/* Volume Control */}
@@ -635,7 +869,26 @@ export function Player() {
           </div>
 
           <button
-            onClick={() => setExpanded(!isExpanded)}
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              openFloatingWidget();
+              setExpanded(false);
+            }}
+            className="p-1.5 hover:text-white transition-colors cursor-pointer"
+            title="Mini-Player Melayang (PiP)"
+          >
+            <ExternalLink className="w-5 h-5" />
+          </button>
+
+          <button
+            type="button"
+            onClick={(e) => {
+              e.stopPropagation();
+              e.preventDefault();
+              setExpanded(!isExpanded);
+            }}
             className="p-1.5 hover:text-white transition-colors cursor-pointer"
             title={isExpanded ? 'Tutup Fullscreen' : 'Buka Fullscreen'}
           >
@@ -654,7 +907,7 @@ export function Player() {
             animate={{ y: 0, opacity: 1 }}
             exit={{ y: '100%', opacity: 0 }}
             transition={{ type: 'spring', damping: 28, stiffness: 220 }}
-            className="fixed inset-0 z-[100] flex flex-col overflow-hidden select-none"
+            className="fixed inset-0 z-[100] flex flex-col overflow-hidden select-none gpu-accelerated"
             style={{
               background: dominantColor
                 ? `linear-gradient(to bottom, color-mix(in srgb, ${dominantColor} 50%, #121212) 0%, #121212 85%)`
@@ -663,13 +916,18 @@ export function Player() {
           >
             {/* Ambient Background Glow for Art */}
             <div className="absolute inset-0 -z-10 overflow-hidden opacity-30 pointer-events-none">
-              <Image src={thumbnail} alt="Ambient glow" fill className="object-cover blur-[90px] scale-125" />
+              <Image src={thumbnail} alt="Ambient glow" fill priority className="object-cover blur-[90px] scale-125" />
             </div>
 
             {/* Top Navigation Bar */}
             <header className="relative z-10 flex items-center justify-between p-4 md:px-8 md:pt-6">
               <button
-                onClick={() => setExpanded(false)}
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  setExpanded(false);
+                }}
                 className="w-10 h-10 rounded-full flex items-center justify-center hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer"
                 aria-label="Tutup"
               >
@@ -679,7 +937,12 @@ export function Player() {
               {/* View Switcher Tabs (Art, Lyrics, Queue) */}
               <div className="flex items-center gap-1 bg-black/40 backdrop-blur-md p-1 rounded-full border border-white/10 shadow-inner">
                 <button
-                  onClick={() => setActiveView('cover')}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    setActiveView('cover');
+                  }}
                   className={cn(
                     'px-4 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer',
                     activeView === 'cover' ? 'bg-white text-black shadow-md' : 'text-white/70 hover:text-white'
@@ -689,7 +952,12 @@ export function Player() {
                   <span>Cover</span>
                 </button>
                 <button
-                  onClick={() => setActiveView('lyrics')}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    setActiveView('lyrics');
+                  }}
                   className={cn(
                     'px-4 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer',
                     activeView === 'lyrics' ? 'bg-white text-black shadow-md' : 'text-white/70 hover:text-white'
@@ -700,7 +968,12 @@ export function Player() {
                   {isSyncedLyrics && <Sparkles className="w-3 h-3 text-[#1DB954]" />}
                 </button>
                 <button
-                  onClick={() => setActiveView('queue')}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    setActiveView('queue');
+                  }}
                   className={cn(
                     'px-4 py-1.5 rounded-full text-xs font-semibold transition-all flex items-center gap-1.5 cursor-pointer',
                     activeView === 'queue' ? 'bg-white text-black shadow-md' : 'text-white/70 hover:text-white'
@@ -712,19 +985,76 @@ export function Player() {
                 </button>
               </div>
 
-              <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5">
                 <button
-                  onClick={handleDownload}
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    openEqualizerModal();
+                  }}
+                  className={cn(
+                    'relative w-9 h-9 rounded-full hidden sm:flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer',
+                    isEqualizerEnabled ? 'text-[#1DB954]' : 'text-white/80 hover:text-white'
+                  )}
+                  title="Equalizer Suara"
+                >
+                  <SlidersHorizontal className="w-4 h-4" />
+                  {isEqualizerEnabled && (
+                    <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    openSleepTimerModal();
+                  }}
+                  className={cn(
+                    'relative w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer',
+                    isSleepTimerActive ? 'text-[#1DB954]' : 'text-white/80 hover:text-white'
+                  )}
+                  title="Pengatur Waktu Tidur"
+                >
+                  <Moon className="w-4 h-4" />
+                  {isSleepTimerActive && (
+                    <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
+                  )}
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    openFloatingWidget();
+                    setExpanded(false);
+                  }}
+                  className="w-9 h-9 rounded-full hidden sm:flex items-center justify-center hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer"
+                  title="Mini-Player Melayang (PiP)"
+                >
+                  <ExternalLink className="w-4 h-4" />
+                </button>
+
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    e.preventDefault();
+                    handleDownload();
+                  }}
                   disabled={isDownloading}
-                  className="w-10 h-10 rounded-full flex items-center justify-center hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
+                  className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
                   title={isDownloaded ? 'Tersimpan offline' : 'Download'}
                 >
                   {isDownloading ? (
-                    <Loader2 className="w-5 h-5 animate-spin text-[#1DB954]" />
+                    <Loader2 className="w-4 h-4 animate-spin text-[#1DB954]" />
                   ) : isDownloaded ? (
-                    <Check className="w-5 h-5 text-[#1DB954]" />
+                    <Check className="w-4 h-4 text-[#1DB954]" />
                   ) : (
-                    <Download className="w-5 h-5" />
+                    <Download className="w-4 h-4" />
                   )}
                 </button>
               </div>
@@ -734,14 +1064,14 @@ export function Player() {
             <div className="flex-1 min-h-0 relative flex flex-col justify-center px-4 md:px-12">
               {/* TAB 1: COVER ART */}
               {activeView === 'cover' && (
-                <div className="flex-1 flex items-center justify-center p-4">
+                <div className="flex-1 flex flex-col items-center justify-center p-4">
                   <motion.div
                     key={currentTrack.videoId}
                     initial={{ opacity: 0, scale: 0.92 }}
                     animate={{ opacity: 1, scale: isPlaying ? 1 : 0.97 }}
                     exit={{ opacity: 0, scale: 0.92 }}
                     transition={{ type: 'spring', damping: 25, stiffness: 120 }}
-                    className="relative w-full aspect-square max-w-[340px] md:max-w-[420px] rounded-2xl overflow-hidden shadow-2xl border border-white/10"
+                    className="relative w-full aspect-square max-w-[320px] md:max-w-[400px] rounded-2xl overflow-hidden shadow-2xl border border-white/10"
                     style={{
                       boxShadow: dominantColor
                         ? `0 20px 50px -10px ${dominantColor}50`
@@ -753,21 +1083,45 @@ export function Player() {
                       alt={currentTrack.name}
                       fill
                       priority
-                      sizes="(max-width: 768px) 340px, 420px"
+                      sizes="(max-width: 768px) 320px, 400px"
                       className="object-cover"
                     />
                   </motion.div>
+
+                  {/* Real-Time Audio Visualizer under Album Cover */}
+                  <div className="w-full max-w-[320px] md:max-w-[400px] mt-4 px-1">
+                    <AudioVisualizer isPlaying={isPlaying} barCount={28} height={36} />
+                  </div>
                 </div>
               )}
 
               {/* TAB 2: SYNCHRONIZED SCROLLING LYRICS */}
               {activeView === 'lyrics' && (
-                <LyricsViewContainer
-                  lyrics={lyrics}
-                  onSeek={handleLyricClick}
-                  isLoading={isLyricsLoading}
-                  isSynced={isSyncedLyrics}
-                />
+                <div className="flex-1 min-h-0 flex flex-col relative w-full">
+                  <div className="absolute top-2 right-4 z-20">
+                    <button
+                      type="button"
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        e.preventDefault();
+                        setExpanded(true);
+                        setIsFullScreenLyricsOpen(true);
+                      }}
+                      className="flex items-center gap-1.5 px-3 py-1.5 bg-white/10 hover:bg-white/20 active:scale-95 text-white rounded-full text-xs font-bold transition-all shadow-lg backdrop-blur-md cursor-pointer"
+                      title="Buka Mode Lirik Layar Penuh Imersif"
+                    >
+                      <Maximize2 className="w-3.5 h-3.5" />
+                      <span className="hidden sm:inline">Layar Penuh</span>
+                    </button>
+                  </div>
+
+                  <LyricsViewContainer
+                    lyrics={lyrics}
+                    onSeek={handleLyricClick}
+                    isLoading={isLyricsLoading}
+                    isSynced={isSyncedLyrics}
+                  />
+                </div>
               )}
 
               {/* TAB 3: UP NEXT QUEUE */}
@@ -777,7 +1131,7 @@ export function Player() {
                     <h3 className="text-xs font-bold text-white/60 uppercase tracking-wider mb-2">Sedang Diputar</h3>
                     <div className="flex items-center gap-3 p-3 bg-white/10 rounded-xl border border-white/10">
                       <div className="relative w-12 h-12 rounded-lg overflow-hidden shrink-0">
-                        <Image src={thumbnail} alt={currentTrack.name} fill sizes="48px" className="object-cover" />
+                        <Image src={thumbnail} alt={currentTrack.name} fill priority sizes="48px" className="object-cover" />
                         <div className="absolute inset-0 bg-black/40 flex items-center justify-center">
                           <div className="flex gap-0.5 items-end h-3">
                             <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_0ms]" />
@@ -800,7 +1154,12 @@ export function Player() {
                       </h3>
                       {queue.length > 1 && (
                         <button
-                          onClick={clearQueue}
+                          type="button"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            e.preventDefault();
+                            clearQueue();
+                          }}
                           className="text-xs text-white/60 hover:text-white transition-colors cursor-pointer"
                         >
                           Hapus Antrean
@@ -811,6 +1170,8 @@ export function Player() {
                     <div className="space-y-1.5">
                       {queue.map((t, idx) => {
                         if (idx <= queueIndex) return null;
+                        const isFirstNext = idx === queueIndex + 1;
+                        const isLastInQueue = idx === queue.length - 1;
                         const thumb = getHighResImage(t.thumbnails?.[t.thumbnails.length - 1]?.url, 100);
                         const art = Array.isArray(t.artist)
                           ? t.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(', ')
@@ -818,28 +1179,80 @@ export function Player() {
                         return (
                           <div
                             key={t.videoId + idx}
-                            onClick={() => playQueueIndex(idx)}
-                            className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-white/10 transition-colors group cursor-pointer border border-transparent hover:border-white/5"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              e.preventDefault();
+                              playQueueIndex(idx);
+                            }}
+                            className="flex items-center gap-3 p-2.5 rounded-xl hover:bg-white/10 transition-colors group cursor-pointer border border-transparent hover:border-white/5 relative"
                           >
+                            <span className="text-[11px] font-mono text-white/40 w-5 text-center shrink-0">
+                              #{idx - queueIndex}
+                            </span>
                             <div className="relative w-11 h-11 rounded-lg overflow-hidden shrink-0">
-                              <Image src={thumb} alt={t.name} fill sizes="44px" className="object-cover" />
+                              <Image
+                                src={thumb}
+                                alt={t.name}
+                                fill
+                                sizes="44px"
+                                loading="lazy"
+                                decoding="async"
+                                className="object-cover"
+                              />
                             </div>
                             <div className="flex-1 min-w-0">
-                              <h5 className="text-white text-sm font-medium truncate group-hover:text-[#1DB954] transition-colors">
+                              <h5 className="text-white text-sm font-medium truncate group-hover:text-accent transition-colors">
                                 {t.name}
                               </h5>
                               <p className="text-white/60 text-xs truncate mt-0.5">{art}</p>
                             </div>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation();
-                                removeFromQueue(idx);
-                              }}
-                              className="p-2 text-white/40 hover:text-red-400 transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
-                              title="Hapus dari antrean"
+
+                            {/* Interactive Reordering & Queue Management Controls */}
+                            <div
+                              className="flex items-center gap-0.5 shrink-0 opacity-80 sm:opacity-0 group-hover:opacity-100 transition-opacity"
+                              onClick={(e) => e.stopPropagation()}
                             >
-                              <Trash2 className="w-4 h-4" />
-                            </button>
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  moveQueueItem(idx, idx - 1);
+                                }}
+                                disabled={isFirstNext}
+                                className="p-1.5 text-white/50 hover:text-white disabled:opacity-20 disabled:hover:text-white/50 transition-colors cursor-pointer"
+                                title="Pindahkan ke atas"
+                              >
+                                <ChevronUp className="w-4 h-4" />
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  moveQueueItem(idx, idx + 1);
+                                }}
+                                disabled={isLastInQueue}
+                                className="p-1.5 text-white/50 hover:text-white disabled:opacity-20 disabled:hover:text-white/50 transition-colors cursor-pointer"
+                                title="Pindahkan ke bawah"
+                              >
+                                <ChevronDown className="w-4 h-4" />
+                              </button>
+
+                              <button
+                                type="button"
+                                onClick={(e) => {
+                                  e.stopPropagation();
+                                  e.preventDefault();
+                                  removeFromQueue(idx);
+                                }}
+                                className="p-1.5 text-white/40 hover:text-red-400 transition-colors cursor-pointer"
+                                title="Hapus dari antrean"
+                              >
+                                <Trash2 className="w-4 h-4" />
+                              </button>
+                            </div>
                           </div>
                         );
                       })}
@@ -967,6 +1380,40 @@ export function Player() {
           </motion.div>
         )}
       </AnimatePresence>
+
+      {/* Immersive Full Screen Karaoke Lyrics Modal (Batch 2 - Poin 24) */}
+      <AnimatePresence>
+        {isFullScreenLyricsOpen && (
+          <ComponentErrorBoundary
+            fallbackTitle="Lirik Layar Penuh"
+            onReset={() => {
+              setIsFullScreenLyricsOpen(false);
+              setExpanded(true);
+            }}
+          >
+            <FullScreenLyrics
+              lyrics={lyrics}
+              onClose={() => {
+                setIsFullScreenLyricsOpen(false);
+                setExpanded(true);
+              }}
+              onSeek={handleLyricClick}
+              isSynced={isSyncedLyrics}
+              isLoading={isLyricsLoading}
+            />
+          </ComponentErrorBoundary>
+        )}
+      </AnimatePresence>
+
+      {/* Compact Floating Lyrics Pill Quick View (Batch 3 - Poin 80) */}
+      <FloatingLyricsPill
+        lyrics={lyrics}
+        isSynced={isSyncedLyrics}
+        onOpenLyrics={() => {
+          setExpanded(true);
+          setIsFullScreenLyricsOpen(true);
+        }}
+      />
     </>
   );
 }

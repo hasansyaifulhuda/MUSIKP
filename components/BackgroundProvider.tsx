@@ -1,15 +1,37 @@
 'use client';
 
-import { useEffect } from 'react';
+import { memo, useEffect } from 'react';
 import { usePlayerStore } from '@/lib/store';
 import { FastAverageColor } from 'fast-average-color';
 import { getHighResImage } from '@/lib/utils';
 import { motion, AnimatePresence } from 'motion/react';
 
-export function BackgroundProvider() {
+export const BackgroundProvider = memo(function BackgroundProvider() {
   const currentTrack = usePlayerStore((state) => state.currentTrack);
   const setDominantColor = usePlayerStore((state) => state.setDominantColor);
   const dominantColor = usePlayerStore((state) => state.dominantColor);
+
+  // One-time cleanup on mount: reset root styles and purge obsolete theme/OLED storage
+  useEffect(() => {
+    if (typeof document !== 'undefined') {
+      const root = document.documentElement;
+      root.classList.remove('oled-theme');
+      root.removeAttribute('data-oled');
+      root.style.removeProperty('--accent-color');
+      root.style.removeProperty('--accent-rgb');
+      root.style.removeProperty('--accent-hover');
+      root.style.removeProperty('--bg-primary');
+      root.style.removeProperty('--bg-surface');
+      root.style.removeProperty('--bg-card');
+      root.style.removeProperty('--bg-elevated');
+    }
+    if (typeof window !== 'undefined' && window.localStorage) {
+      try {
+        localStorage.removeItem('pmusic_theme_accent_id_v1');
+        localStorage.removeItem('pmusic_oled_mode_v1');
+      } catch {}
+    }
+  }, []);
 
   useEffect(() => {
     if (!currentTrack?.thumbnails?.length) {
@@ -39,12 +61,15 @@ export function BackgroundProvider() {
     };
 
     return () => {
+      img.onload = null;
+      img.onerror = null;
+      img.src = '';
       fac.destroy();
     };
   }, [currentTrack?.videoId, currentTrack?.thumbnails, setDominantColor]);
 
   return (
-    <div className="fixed inset-0 -z-50 bg-[#0A0A0A] overflow-hidden pointer-events-none">
+    <div className="fixed inset-0 -z-50 bg-[#0A0A0A] overflow-hidden pointer-events-none transition-colors duration-500 gpu-accelerated contain-strict">
       <AnimatePresence>
         {dominantColor && (
           <motion.div
@@ -53,13 +78,16 @@ export function BackgroundProvider() {
             animate={{ opacity: 1 }}
             exit={{ opacity: 0 }}
             transition={{ duration: 1.5, ease: "easeInOut" }}
-            className="absolute inset-0"
+            className="absolute inset-0 gpu-accelerated"
             style={{
-              background: `radial-gradient(circle at 50% 0%, color-mix(in srgb, ${dominantColor} 40%, #0A0A0A) 0%, #0A0A0A 100%)`
+              background: `radial-gradient(circle at 50% 0%, color-mix(in srgb, ${dominantColor} 40%, #0A0A0A) 0%, #0A0A0A 100%)`,
+              willChange: 'opacity, transform',
+              transform: 'translateZ(0)',
+              backfaceVisibility: 'hidden',
             }}
           />
         )}
       </AnimatePresence>
     </div>
   );
-}
+});

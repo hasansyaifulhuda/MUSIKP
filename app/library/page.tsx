@@ -5,6 +5,7 @@ import { useRouter, useSearchParams } from 'next/navigation';
 import { db, SubscribedArtist, SavedAlbum, OfflineTrack } from '@/lib/db';
 import { Track, usePlayerStore } from '@/lib/store';
 import { TrackItem } from '@/components/TrackItem';
+import { VirtualTrackList } from '@/components/VirtualTrackList';
 import {
   Heart,
   Plus,
@@ -21,6 +22,9 @@ import {
 import Image from 'next/image';
 import { toast } from '@/lib/toast';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
+import { HeaderUtilityBar } from '@/components/HeaderUtilityBar';
+import { AudioPresetDrawer } from '@/components/AudioPresetDrawer';
+import { cn } from '@/lib/utils';
 
 function LibraryContent() {
   const router = useRouter();
@@ -36,12 +40,16 @@ function LibraryContent() {
   const [offlineTracks, setOfflineTracks] = useState<OfflineTrack[]>([]);
   const [activeTab, setActiveTab] = useState<string>('Semua');
   const [likedSearchQuery, setLikedSearchQuery] = useState('');
+  const [selectedMood, setSelectedMood] = useState<string>('Semua');
   const [showCreate, setShowCreate] = useState(false);
   const [newPlaylistName, setNewPlaylistName] = useState('');
   const [newPlaylistImg, setNewPlaylistImg] = useState('');
   const playTrack = usePlayerStore((state) => state.playTrack);
+  const history = usePlayerStore((state) => state.history);
+  const clearHistory = usePlayerStore((state) => state.clearHistory);
 
-  const tabs = ['Semua', 'Daftar putar', 'Lagu Disukai', 'Album', 'Artis', 'Diunduh'];
+  const tabs = ['Semua', 'Daftar putar', 'Lagu Disukai', 'Diunduh', 'Riwayat', 'Album', 'Artis'];
+  const moodFilters = ['Semua', 'Pop', 'Rock', 'Akustik', 'Chill', 'Enerjik', 'Fokus'];
 
   // Automatically default to 'Diunduh' once on initial load when offline if no specific tab is selected
   useEffect(() => {
@@ -128,6 +136,11 @@ function LibraryContent() {
     });
   }, [likedSongs, likedSearchQuery]);
 
+  const offlineTrackList = useMemo(
+    () => offlineTracks.map((o) => o.track).filter(Boolean),
+    [offlineTracks]
+  );
+
   const handleShuffleLikedSongs = () => {
     if (likedSongs.length === 0) return;
     const shuffled = [...likedSongs].sort(() => Math.random() - 0.5);
@@ -172,13 +185,19 @@ function LibraryContent() {
   };
 
   return (
-    <main className="min-h-screen pt-4 px-4 md:px-8 pb-32 max-w-6xl mx-auto select-none">
+    <main className="min-h-screen pt-4 px-4 md:px-8 pb-32 max-w-6xl mx-auto select-none space-y-4">
+      {/* Poin 85: Header Utility Bar (Storage & Offline Meter) */}
+      <HeaderUtilityBar />
+
+      {/* Poin 82: Audio Preset Quick Selector Drawer */}
+      <AudioPresetDrawer />
+
       {/* Header View */}
-      <div className="flex items-center justify-between mb-5">
+      <div className="flex items-center justify-between pt-1">
         <div>
           <h1 className="text-2xl md:text-3xl font-extrabold text-white tracking-tight">Koleksi Anda</h1>
           <p className="text-xs text-[#b3b3b3] mt-0.5 hidden sm:block">
-            Semua musik favorit, playlist, dan unduhan Anda di satu tempat.
+            Semua musik favorit, playlist, unduhan, dan riwayat Anda di satu tempat.
           </p>
         </div>
         <button
@@ -190,10 +209,16 @@ function LibraryContent() {
         </button>
       </div>
 
-      {/* PMUSIC Modern Filter Pills */}
-      <div className="flex overflow-x-auto no-scrollbar gap-2 mb-6 snap-x snap-mandatory">
+      {/* Poin 81: Smart Tabbed Manager */}
+      <div className="flex overflow-x-auto no-scrollbar gap-2 snap-x snap-mandatory pt-1">
         {tabs.map((tab) => {
           const isActive = activeTab === tab;
+          let count = '';
+          if (tab === 'Lagu Disukai') count = ` (${likedSongs.length})`;
+          else if (tab === 'Diunduh') count = ` (${offlineTracks.length})`;
+          else if (tab === 'Riwayat') count = ` (${history.length})`;
+          else if (tab === 'Daftar putar') count = ` (${playlists.length})`;
+
           return (
             <button
               key={tab}
@@ -209,7 +234,29 @@ function LibraryContent() {
                   : 'bg-[#242424] hover:bg-[#2a2a2a] text-white'
               }`}
             >
-              {tab}
+              {tab}{count}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* Poin 83: Instant Filter Pills (Genre/Mood) */}
+      <div className="flex items-center gap-1.5 overflow-x-auto no-scrollbar pb-2">
+        <span className="text-[11px] font-semibold text-white/40 uppercase tracking-wider shrink-0 mr-1">Filter:</span>
+        {moodFilters.map((mood) => {
+          const isSelected = selectedMood === mood;
+          return (
+            <button
+              key={mood}
+              onClick={() => setSelectedMood(mood)}
+              className={cn(
+                'px-2.5 py-1 rounded-lg text-xs font-medium transition-all shrink-0 cursor-pointer',
+                isSelected
+                  ? 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
+                  : 'bg-white/5 hover:bg-white/10 text-white/60 hover:text-white border border-transparent'
+              )}
+            >
+              {mood}
             </button>
           );
         })}
@@ -315,14 +362,23 @@ function LibraryContent() {
               </div>
 
               {/* User Playlists */}
-              {playlists.map((pl) => (
+              {playlists.map((pl, i) => (
                 <div
                   key={pl.id}
                   className="flex flex-col justify-between p-4 bg-[#181818]/70 hover:bg-[#282828] rounded-2xl cursor-pointer transition-all duration-200 group select-none border border-white/5 shadow-sm relative min-h-[190px] md:min-h-[220px]"
                   onClick={() => router.push(`/playlist/${pl.id}`)}
                 >
                   <div className="relative w-full aspect-video rounded-xl overflow-hidden bg-white/5 shadow mb-3">
-                    <Image src={pl.img} alt={pl.name} fill sizes="(max-width: 768px) 100vw, 300px" className="object-cover group-hover:scale-105 transition-transform duration-300" />
+                    <Image
+                      src={pl.img}
+                      alt={pl.name}
+                      fill
+                      sizes="(max-width: 768px) 100vw, 300px"
+                      priority={i < 2}
+                      loading={i < 2 ? undefined : 'lazy'}
+                      decoding="async"
+                      className="object-cover group-hover:scale-105 transition-transform duration-300"
+                    />
                     <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 transition-opacity flex items-center justify-center">
                       <button
                         onClick={(e) => {
@@ -436,9 +492,12 @@ function LibraryContent() {
 
           {/* Tracks List */}
           <div className="space-y-1">
-            {filteredLikedSongs.map((track, i) => (
-              <TrackItem key={track.videoId + i} track={track} queue={filteredLikedSongs} index={i} />
-            ))}
+            {filteredLikedSongs.length > 0 && (
+              <VirtualTrackList
+                tracks={filteredLikedSongs}
+                queue={filteredLikedSongs}
+              />
+            )}
 
             {likedSongs.length === 0 && (
               <div className="text-center text-white/50 py-20 space-y-3 bg-[#181818]/40 rounded-2xl border border-white/5">
@@ -458,7 +517,7 @@ function LibraryContent() {
 
             {likedSongs.length > 0 && filteredLikedSongs.length === 0 && (
               <div className="text-center text-white/40 py-12">
-                <p className="text-sm">Tidak ada lagu yang cocok dengan "{likedSearchQuery}"</p>
+                <p className="text-sm">Tidak ada lagu yang cocok dengan &quot;{likedSearchQuery}&quot;</p>
               </div>
             )}
           </div>
@@ -489,18 +548,16 @@ function LibraryContent() {
             )}
           </div>
           <div className="space-y-1">
-            {offlineTracks.map((item, i) => (
-              <TrackItem
-                key={item.videoId + i}
-                track={item.track}
-                queue={offlineTracks.map((o) => o.track)}
-                index={i}
+            {offlineTrackList.length > 0 && (
+              <VirtualTrackList
+                tracks={offlineTrackList}
+                queue={offlineTrackList}
                 onRemove={async (t) => {
                   await db.removeOfflineTrack(t.videoId);
                   loadLibrary();
                 }}
               />
-            ))}
+            )}
             {offlineTracks.length === 0 && (
               <div className="text-center text-white/50 py-16 space-y-2">
                 <Download className="w-12 h-12 mx-auto opacity-30" />
@@ -519,7 +576,7 @@ function LibraryContent() {
         <div className="space-y-4">
           <h2 className="text-xl font-bold text-white mb-2">Album Disimpan</h2>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-            {savedAlbums.map((album) => (
+            {savedAlbums.map((album, i) => (
               <div
                 key={album.albumId}
                 className="p-3 bg-[#181818]/60 hover:bg-[#282828] rounded-md cursor-pointer transition-colors duration-200 group select-none shadow-sm flex flex-col"
@@ -531,6 +588,9 @@ function LibraryContent() {
                     alt={album.name}
                     fill
                     sizes="(max-width: 640px) 50vw, 200px"
+                    priority={i < 4}
+                    loading={i < 4 ? undefined : 'lazy'}
+                    decoding="async"
                     className="object-cover"
                   />
                   <div className="absolute right-2 bottom-2 w-10 h-10 rounded-full bg-[#1DB954] text-black flex items-center justify-center opacity-0 translate-y-2 group-hover:opacity-100 group-hover:translate-y-0 transition-all duration-200 shadow-xl">
@@ -557,7 +617,7 @@ function LibraryContent() {
         <div className="space-y-4">
           <h2 className="text-xl font-bold text-white mb-2">Artis yang Diikuti</h2>
           <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4">
-            {subscribedArtists.map((artist) => (
+            {subscribedArtists.map((artist, i) => (
               <div
                 key={artist.artistId}
                 className="p-3 bg-[#181818]/60 hover:bg-[#282828] rounded-md cursor-pointer transition-colors duration-200 flex flex-col items-center group select-none shadow-sm text-center"
@@ -569,6 +629,9 @@ function LibraryContent() {
                     alt={artist.name}
                     fill
                     sizes="128px"
+                    priority={i < 4}
+                    loading={i < 4 ? undefined : 'lazy'}
+                    decoding="async"
                     className="object-cover"
                   />
                 </div>
@@ -585,10 +648,51 @@ function LibraryContent() {
         </div>
       )}
 
+      {/* ========================================================================= */}
+      {/* 5. HISTORY TAB (Smart Library Manager - Poin 81)                           */}
+      {/* ========================================================================= */}
+      {activeTab === 'Riwayat' && (
+        <div className="space-y-4">
+          <div className="flex items-center justify-between pb-2 border-b border-white/10">
+            <div>
+              <h2 className="text-lg font-bold text-white">Riwayat Terakhir Diputar</h2>
+              <p className="text-xs text-white/50">Daftar lagu yang baru-baru ini Anda dengarkan.</p>
+            </div>
+            {history.length > 0 && (
+              <button
+                onClick={() => {
+                  if (confirm('Bersihkan seluruh riwayat putar?')) {
+                    clearHistory();
+                  }
+                }}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-500/10 hover:bg-red-500/20 text-red-400 text-xs font-semibold transition-colors cursor-pointer"
+              >
+                <Trash2 className="w-3.5 h-3.5" />
+                <span>Bersihkan</span>
+              </button>
+            )}
+          </div>
+
+          <div className="space-y-1">
+            {history.map((item, idx) => (
+              <TrackItem
+                key={`${item.track.videoId}_${item.playedAt || idx}`}
+                track={item.track}
+                index={idx}
+                queue={history.map((h) => h.track)}
+              />
+            ))}
+            {history.length === 0 && (
+              <div className="text-center text-white/40 py-16">Belum ada riwayat pemutaran lagu.</div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* CREATE PLAYLIST MODAL */}
       {showCreate && (
         <div
-          className="fixed inset-0 z-50 bg-black/80 backdrop-blur-md flex items-center justify-center p-4"
+          className="fixed inset-0 z-[150] bg-black/80 backdrop-blur-md flex items-center justify-center p-4"
           onClick={() => setShowCreate(false)}
         >
           <div

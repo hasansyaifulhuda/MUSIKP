@@ -46,6 +46,8 @@ export async function GET(request: Request) {
   const isDownloadRequested = searchParams.get('download') === 'true' || searchParams.get('dl') === 'true';
   const rawTitle = searchParams.get('title') || `${videoId}.mp3`;
   const customTitle = rawTitle.endsWith('.mp3') ? rawTitle : `${rawTitle}.mp3`;
+  const rawQuality = searchParams.get('quality') || searchParams.get('q') || 'auto';
+  const quality = rawQuality === 'low' || rawQuality === 'high' || rawQuality === 'normal' ? rawQuality : 'auto';
 
   try {
     // -------------------------------------------------------------
@@ -111,7 +113,7 @@ export async function GET(request: Request) {
     // Tier 3: Upstream Stream Resolution & Live Proxy Streaming
     // -------------------------------------------------------------
     const isMemCached = streamCache.has(videoId);
-    const stream = await resolveAudioStream(videoId);
+    const stream = await resolveAudioStream(videoId, quality);
 
     // If stream URL was successfully resolved, trigger non-blocking disk caching in background
     if (!videoId.startsWith('itunes:')) {
@@ -295,7 +297,9 @@ export async function HEAD(request: Request) {
 
   // 2. Upstream Metadata Check
   try {
-    const stream = await resolveAudioStream(videoId);
+    const rawQuality = searchParams.get('quality') || searchParams.get('q') || 'auto';
+    const quality = rawQuality === 'low' || rawQuality === 'high' || rawQuality === 'normal' ? rawQuality : 'auto';
+    const stream = await resolveAudioStream(videoId, quality);
     const headers = new Headers();
     headers.set('Content-Type', stream.ext === 'mp3' ? 'audio/mpeg' : 'audio/mp4');
     headers.set('Accept-Ranges', 'bytes');

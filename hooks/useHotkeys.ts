@@ -9,16 +9,22 @@ interface HotkeyOptions {
   onToggleMute?: () => void;
   onNextTrack?: () => void;
   onPrevTrack?: () => void;
+  onVolumeUp?: () => void;
+  onVolumeDown?: () => void;
+  onToggleDevPanel?: () => void;
 }
 
 /**
- * Global Keyboard Shortcuts Hook:
- * - Space: Play / Pause
+ * Global Keyboard Shortcuts Master Controls (Poin 97):
+ * - Space / 'k': Play / Pause
  * - ArrowLeft / 'j': Seek backward 5s
  * - ArrowRight / 'l': Seek forward 5s
+ * - ArrowUp: Volume +5%
+ * - ArrowDown: Volume -5%
  * - 'm' / 'M': Mute / Unmute
- *
- * Automatically disables shortcuts when focus is inside text inputs, textareas, or contentEditable elements.
+ * - 'n' / 'N': Next Track
+ * - 'p' / 'P': Prev Track
+ * - Ctrl + Shift + D: Developer Diagnostic Modal (Poin 100)
  */
 export function useHotkeys(options: HotkeyOptions) {
   const optionsRef = useRef(options);
@@ -31,9 +37,16 @@ export function useHotkeys(options: HotkeyOptions) {
     if (typeof window === 'undefined') return;
 
     const handleKeyDown = (event: KeyboardEvent) => {
+      // Secret developer shortcut: Ctrl+Shift+D
+      if ((event.ctrlKey || event.metaKey) && event.shiftKey && (event.key === 'D' || event.key === 'd')) {
+        event.preventDefault();
+        optionsRef.current.onToggleDevPanel?.();
+        return;
+      }
+
       const target = event.target as HTMLElement | null;
 
-      // Ignore when user is actively typing in an input, textarea, select, or editable element
+      // Ignore when user is actively typing in input fields
       if (
         target &&
         (target.tagName === 'INPUT' ||
@@ -44,7 +57,7 @@ export function useHotkeys(options: HotkeyOptions) {
         return;
       }
 
-      // Check modifier keys (don't override Cmd+C, Ctrl+R, Alt+Tab, etc.)
+      // Check modifier keys (don't override Cmd+C, Ctrl+R, etc.)
       if (event.ctrlKey || event.metaKey || event.altKey) {
         return;
       }
@@ -74,10 +87,38 @@ export function useHotkeys(options: HotkeyOptions) {
           break;
         }
 
+        // Volume Up (+5%)
+        case 'ArrowUp': {
+          event.preventDefault();
+          optionsRef.current.onVolumeUp?.();
+          break;
+        }
+
+        // Volume Down (-5%)
+        case 'ArrowDown': {
+          event.preventDefault();
+          optionsRef.current.onVolumeDown?.();
+          break;
+        }
+
         // Mute / Unmute
         case 'KeyM': {
           event.preventDefault();
           optionsRef.current.onToggleMute?.();
+          break;
+        }
+
+        // Next Track
+        case 'KeyN': {
+          event.preventDefault();
+          optionsRef.current.onNextTrack?.();
+          break;
+        }
+
+        // Previous Track
+        case 'KeyP': {
+          event.preventDefault();
+          optionsRef.current.onPrevTrack?.();
           break;
         }
 

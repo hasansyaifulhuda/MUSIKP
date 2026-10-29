@@ -1,6 +1,7 @@
 import { openDB, DBSchema, IDBPDatabase } from 'idb';
 import { Track } from './store';
 import { LyricLine, normalizeLyrics } from './performance';
+import { compressString, decompressString } from './compression';
 
 export interface SavedAlbum {
   albumId: string;
@@ -22,25 +23,46 @@ export interface RecentSearch {
   timestamp: number;
 }
 
+export interface CustomPlaylist {
+  id: string;
+  name: string;
+  img: string;
+  tracks: Track[];
+  createdAt?: number;
+  updatedAt?: number;
+}
+
 export interface OfflineTrack {
   videoId: string;
   track: Track;
   blob?: Blob;
   downloadedAt: number;
+  lastPlayedAt?: number;
+  playCount?: number;
+  sizeBytes?: number;
   lyrics?: LyricLine[];
   isSyncedLyrics?: boolean;
   synced?: boolean;
 }
 
+export interface PaginationOptions {
+  offset?: number;
+  limit?: number;
+  reverse?: boolean;
+}
+
+export interface PaginatedResult<T> {
+  items: T[];
+  total: number;
+  offset: number;
+  limit: number;
+  hasMore: boolean;
+}
+
 interface SannMusicDB extends DBSchema {
   playlists: {
     key: string;
-    value: {
-      id: string;
-      name: string;
-      img: string;
-      tracks: Track[];
-    };
+    value: CustomPlaylist;
   };
   liked_songs: {
     key: string;
@@ -61,11 +83,33 @@ interface SannMusicDB extends DBSchema {
   offline_tracks: {
     key: string;
     value: OfflineTrack;
+    indexes: {
+      by_downloadedAt: number;
+      by_lastPlayedAt: number;
+    };
+  };
+  metadata_cache: {
+    key: string;
+    value: {
+      key: string;
+      data: string;
+      compressed: boolean;
+      byteLength: number;
+      updatedAt: number;
+      expiresAt: number;
+    };
+  };
+  offline_search_tokens: {
+    key: string;
+    value: {
+      token: string;
+      trackIds: string[];
+    };
   };
 }
 
 const DB_NAME = 'SannMusicDB';
-const DB_VERSION = 5;
+const DB_VERSION = 6;
 
 /**
  * Enterprise-Grade IndexedDB Singleton Manager:
@@ -158,9 +202,12 @@ class DatabaseManager {
       }
     }
 
-    // 3. Initiate safe connection with schema upgrade definitions
+    // 3. Initiate safe connection with granular schema upgrade migrations (Batch 3 - Poin 61)
     this.openingPromise = openDB<SannMusicDB>(DB_NAME, DB_VERSION, {
-      upgrade(db) {
+      upgrade(db, oldVersion, newVersion, transaction) {
+        console.info(`[IndexedDB Migration] Migrating schema: v${oldVersion} -> v${newVersion}`);
+
+        // Version 1-4 Baseline Stores
         if (!db.objectStoreNames.contains('playlists')) {
           db.createObjectStore('playlists', { keyPath: 'id' });
         }
@@ -176,8 +223,28 @@ class DatabaseManager {
         if (!db.objectStoreNames.contains('recent_searches')) {
           db.createObjectStore('recent_searches', { keyPath: 'query' });
         }
+
+        // Offline tracks store and indices
+        let offlineStore;
         if (!db.objectStoreNames.contains('offline_tracks')) {
-          db.createObjectStore('offline_tracks', { keyPath: 'videoId' });
+          offlineStore = db.createObjectStore('offline_tracks', { keyPath: 'videoId' });
+        } else {
+          offlineStore = transaction.objectStore('offline_tracks');
+        }
+
+        if (offlineStore && !offlineStore.indexNames.contains('by_downloadedAt')) {
+          offlineStore.createIndex('by_downloadedAt', 'downloadedAt');
+        }
+        if (offlineStore && !offlineStore.indexNames.contains('by_lastPlayedAt')) {
+          offlineStore.createIndex('by_lastPlayedAt', 'lastPlayedAt');
+        }
+
+        // Version 6: Memory-bound metadata cache & local offline search token index
+        if (!db.objectStoreNames.contains('metadata_cache')) {
+          db.createObjectStore('metadata_cache', { keyPath: 'key' });
+        }
+        if (!db.objectStoreNames.contains('offline_search_tokens')) {
+          db.createObjectStore('offline_search_tokens', { keyPath: 'token' });
         }
       },
       blocked() {
@@ -279,9 +346,9 @@ export async function requestPersistentStorage(): Promise<boolean> {
 
 export const db = {
   // -------------------------------------------------------------
-  // Playlists
+  // Custom Playlists (IndexedDB Powered)
   // -------------------------------------------------------------
-  async getPlaylists(): Promise<{ id: string; name: string; img: string; tracks: Track[] }[]> {
+  async getPlaylists(): Promise<CustomPlaylist[]> {
     if (typeof window === 'undefined') return [];
     try {
       return await dbManager.executeWithRetry((idb) => idb.getAll('playlists'));
@@ -291,7 +358,7 @@ export const db = {
     }
   },
 
-  async addPlaylist(playlist: { id: string; name: string; img: string; tracks: Track[] }): Promise<boolean> {
+  async addPlaylist(playlist: CustomPlaylist): Promise<boolean> {
     if (typeof window === 'undefined' || !playlist?.id) return false;
     try {
       await dbManager.executeWithRetry((idb) => idb.put('playlists', playlist));
@@ -302,7 +369,94 @@ export const db = {
     }
   },
 
-  async getPlaylist(id: string): Promise<{ id: string; name: string; img: string; tracks: Track[] } | undefined> {
+  async createPlaylist(name: string, img: string = '', initialTracks: Track[] = []): Promise<CustomPlaylist | null> {
+    if (typeof window === 'undefined') return null;
+    const cleanName = name.trim() || 'Playlist Kustom';
+    const newPlaylist: CustomPlaylist = {
+      id: `playlist_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      name: cleanName,
+      img,
+      tracks: initialTracks,
+      createdAt: Date.now(),
+      updatedAt: Date.now(),
+    };
+    try {
+      await dbManager.executeWithRetry((idb) => idb.put('playlists', newPlaylist));
+      return newPlaylist;
+    } catch (err) {
+      console.warn('[IDB] Failed to create custom playlist:', err);
+      return null;
+    }
+  },
+
+  async updatePlaylist(id: string, updates: Partial<{ name: string; img: string; tracks: Track[] }>): Promise<boolean> {
+    if (typeof window === 'undefined' || !id) return false;
+    try {
+      return await dbManager.executeWithRetry(async (idb) => {
+        const existing = await idb.get('playlists', id);
+        if (!existing) return false;
+        const updated: CustomPlaylist = {
+          ...existing,
+          ...updates,
+          updatedAt: Date.now(),
+        };
+        await idb.put('playlists', updated);
+        return true;
+      });
+    } catch (err) {
+      console.warn(`[IDB] Failed to update playlist ${id}:`, err);
+      return false;
+    }
+  },
+
+  async addSongToPlaylist(playlistId: string, track: Track): Promise<boolean> {
+    if (typeof window === 'undefined' || !playlistId || !track?.videoId) return false;
+    try {
+      return await dbManager.executeWithRetry(async (idb) => {
+        const existing = await idb.get('playlists', playlistId);
+        if (!existing) return false;
+        const tracks = existing.tracks || [];
+        if (tracks.some((t) => t.videoId === track.videoId)) {
+          return true;
+        }
+        const updatedTracks = [...tracks, track];
+        const updated: CustomPlaylist = {
+          ...existing,
+          tracks: updatedTracks,
+          img: existing.img || track.thumbnails?.[track.thumbnails.length - 1]?.url || '',
+          updatedAt: Date.now(),
+        };
+        await idb.put('playlists', updated);
+        return true;
+      });
+    } catch (err) {
+      console.warn(`[IDB] Failed to add song to playlist ${playlistId}:`, err);
+      return false;
+    }
+  },
+
+  async removeSongFromPlaylist(playlistId: string, videoId: string): Promise<boolean> {
+    if (typeof window === 'undefined' || !playlistId || !videoId) return false;
+    try {
+      return await dbManager.executeWithRetry(async (idb) => {
+        const existing = await idb.get('playlists', playlistId);
+        if (!existing) return false;
+        const updatedTracks = (existing.tracks || []).filter((t) => t.videoId !== videoId);
+        const updated: CustomPlaylist = {
+          ...existing,
+          tracks: updatedTracks,
+          updatedAt: Date.now(),
+        };
+        await idb.put('playlists', updated);
+        return true;
+      });
+    } catch (err) {
+      console.warn(`[IDB] Failed to remove song from playlist ${playlistId}:`, err);
+      return false;
+    }
+  },
+
+  async getPlaylist(id: string): Promise<CustomPlaylist | undefined> {
     if (typeof window === 'undefined' || !id) return undefined;
     try {
       return await dbManager.executeWithRetry((idb) => idb.get('playlists', id));
@@ -334,6 +488,10 @@ export const db = {
       console.warn('[IDB] Failed to get liked songs:', err);
       return [];
     }
+  },
+
+  async getLikedSongsPaged(options?: PaginationOptions): Promise<PaginatedResult<Track>> {
+    return this.getPaged('liked_songs', options);
   },
 
   async addLikedSong(track: Track): Promise<boolean> {
@@ -511,6 +669,10 @@ export const db = {
       const keys = await dbManager.executeWithRetry((idb) => idb.getAllKeys('offline_tracks'));
       offlineTrackIdsCache.clear();
       keys.forEach((k) => offlineTrackIdsCache.add(String(k)));
+      // Schedule background LRU eviction check on startup
+      setTimeout(() => {
+        this.evictLruOfflineTracks().catch(() => {});
+      }, 4000);
     } catch {}
   },
 
@@ -531,6 +693,77 @@ export const db = {
       console.warn('[IDB] Failed to get offline tracks:', err);
       return [];
     }
+  },
+
+  /**
+   * Lazy-loaded cursor-based reader for offline tracks.
+   * Loads tracks in small paginated batches to keep RAM usage minimal.
+   */
+  async getOfflineTracksPaged(options?: PaginationOptions): Promise<PaginatedResult<OfflineTrack>> {
+    const res = await this.getPaged('offline_tracks', options);
+    const validItems = res.items.filter((it) => it && it.blob && it.blob instanceof Blob && it.blob.size > 0);
+    validItems.forEach((it) => offlineTrackIdsCache.add(it.videoId));
+    return {
+      ...res,
+      items: validItems,
+    };
+  },
+
+  /**
+   * Generic cursor-based paginated reader for IndexedDB stores.
+   * Efficiently advances cursors to stream only requested chunks into memory.
+   */
+  async getPaged<K extends 'liked_songs' | 'offline_tracks' | 'playlists' | 'saved_albums' | 'subscribed_artists' | 'recent_searches'>(
+    storeName: K,
+    options?: PaginationOptions
+  ): Promise<PaginatedResult<SannMusicDB[K]['value']>> {
+    if (typeof window === 'undefined') {
+      return { items: [], total: 0, offset: 0, limit: 30, hasMore: false };
+    }
+
+    const offset = Math.max(0, options?.offset || 0);
+    const limit = Math.max(1, Math.min(100, options?.limit || 30));
+    const reverse = options?.reverse ?? false;
+
+    try {
+      return await dbManager.executeWithRetry(async (idb) => {
+        const tx = idb.transaction(storeName, 'readonly');
+        const store = tx.store;
+        const total = await store.count();
+
+        if (total === 0 || offset >= total) {
+          return { items: [], total, offset, limit, hasMore: false };
+        }
+
+        const items: SannMusicDB[K]['value'][] = [];
+        let cursor = await store.openCursor(null, reverse ? 'prev' : 'next');
+
+        if (offset > 0 && cursor) {
+          cursor = await cursor.advance(offset);
+        }
+
+        while (cursor && items.length < limit) {
+          items.push(cursor.value);
+          cursor = await cursor.continue();
+        }
+
+        await tx.done;
+
+        const hasMore = offset + items.length < total;
+        return { items, total, offset, limit, hasMore };
+      });
+    } catch (err) {
+      console.warn(`[IDB] Failed to read paginated items from ${storeName}:`, err);
+      return { items: [], total: 0, offset, limit, hasMore: false };
+    }
+  },
+
+  async getSavedAlbumsPaged(options?: PaginationOptions): Promise<PaginatedResult<SavedAlbum>> {
+    return this.getPaged('saved_albums', options);
+  },
+
+  async getSubscribedArtistsPaged(options?: PaginationOptions): Promise<PaginatedResult<SubscribedArtist>> {
+    return this.getPaged('subscribed_artists', options);
   },
 
   async getOfflineTrack(videoId: string): Promise<OfflineTrack | undefined> {
@@ -640,9 +873,16 @@ export const db = {
       finalSynced = Boolean(lyricsData.isSyncedLyrics ?? lyricsData.synced);
     } else if (typeof navigator !== 'undefined' && navigator.onLine) {
       try {
-        const artistName = Array.isArray(track.artist)
-          ? track.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(' ')
-          : track.artist?.name || '';
+        let artistName = '';
+        if (typeof (track as any).artistName === 'string') {
+          artistName = (track as any).artistName;
+        } else if (typeof track.artist === 'string') {
+          artistName = track.artist;
+        } else if (Array.isArray(track.artist)) {
+          artistName = track.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(' ');
+        } else if (track.artist && typeof track.artist === 'object') {
+          artistName = (track.artist as any).name || '';
+        }
         const dur = Math.round(track.duration || 200);
         const lyricsUrl = `/api/lyrics?id=${encodeURIComponent(track.videoId)}&title=${encodeURIComponent(
           track.name || ''
@@ -653,7 +893,7 @@ export const db = {
           try {
             lyricsController.abort();
           } catch {}
-        }, 6000);
+        }, 15000);
 
         const lyricsRes = await fetch(lyricsUrl, { signal: lyricsController.signal })
           .then((r) => (r.ok ? r.json() : null))
@@ -670,11 +910,19 @@ export const db = {
       }
     }
 
+    // Opportunistically run LRU eviction to prevent storage quota exhaustion
+    try {
+      await this.evictLruOfflineTracks();
+    } catch {}
+
     const item: OfflineTrack = {
       videoId: track.videoId,
       track,
       blob: audioBlob,
       downloadedAt: Date.now(),
+      lastPlayedAt: Date.now(),
+      playCount: 0,
+      sizeBytes: audioBlob.size,
       lyrics: finalLyrics,
       isSyncedLyrics: finalSynced,
       synced: finalSynced,
@@ -687,6 +935,121 @@ export const db = {
     } catch (err) {
       console.warn(`[IDB] Failed to save offline track ${track.videoId}:`, err);
       throw err;
+    }
+  },
+
+  /**
+   * Updates lastPlayedAt timestamp and increments playCount for LRU tracking.
+   */
+  async recordOfflineTrackPlay(videoId: string): Promise<void> {
+    if (typeof window === 'undefined' || !videoId) return;
+    try {
+      await dbManager.executeWithRetry(async (idb) => {
+        const item = await idb.get('offline_tracks', videoId);
+        if (item) {
+          item.lastPlayedAt = Date.now();
+          item.playCount = (item.playCount || 0) + 1;
+          await idb.put('offline_tracks', item);
+        }
+      });
+    } catch {}
+  },
+
+  /**
+   * Retrieves browser storage usage and quota estimate.
+   */
+  async getStorageEstimate(): Promise<{
+    usageBytes: number;
+    quotaBytes: number;
+    percentage: number;
+    isAvailable: boolean;
+  }> {
+    if (typeof window === 'undefined' || !navigator.storage || !navigator.storage.estimate) {
+      return { usageBytes: 0, quotaBytes: 0, percentage: 0, isAvailable: false };
+    }
+    try {
+      const estimate = await navigator.storage.estimate();
+      const usage = estimate.usage || 0;
+      const quota = estimate.quota || 0;
+      const percentage = quota > 0 ? (usage / quota) * 100 : 0;
+      return {
+        usageBytes: usage,
+        quotaBytes: quota,
+        percentage: Math.round(percentage * 10) / 10,
+        isAvailable: true,
+      };
+    } catch {
+      return { usageBytes: 0, quotaBytes: 0, percentage: 0, isAvailable: false };
+    }
+  },
+
+  /**
+   * Least Recently Used (LRU) Cache Eviction Algorithm for IndexedDB audio blobs.
+   * Automatically purges the oldest / least played tracks when max capacity or quota is approached.
+   */
+  async evictLruOfflineTracks(options?: {
+    maxItems?: number;
+    quotaThresholdRatio?: number;
+    targetCleanCount?: number;
+  }): Promise<{ evictedCount: number; freedBytes: number }> {
+    if (typeof window === 'undefined') return { evictedCount: 0, freedBytes: 0 };
+    const maxItems = options?.maxItems ?? 100;
+    const quotaThresholdRatio = options?.quotaThresholdRatio ?? 0.85;
+    const targetCleanCount = options?.targetCleanCount ?? 5;
+
+    try {
+      const allItems = await dbManager.executeWithRetry((idb) => idb.getAll('offline_tracks'));
+      if (!allItems || allItems.length === 0) return { evictedCount: 0, freedBytes: 0 };
+
+      let needsEviction = allItems.length >= maxItems;
+
+      if (!needsEviction && navigator.storage && navigator.storage.estimate) {
+        try {
+          const estimate = await navigator.storage.estimate();
+          if (estimate.usage && estimate.quota && estimate.quota > 0) {
+            const ratio = estimate.usage / estimate.quota;
+            if (ratio >= quotaThresholdRatio) {
+              needsEviction = true;
+            }
+          }
+        } catch {}
+      }
+
+      if (!needsEviction) return { evictedCount: 0, freedBytes: 0 };
+
+      // Sort ascending: oldest lastPlayedAt (or downloadedAt) and lowest playCount first
+      const sorted = [...allItems].sort((a, b) => {
+        const timeA = a.lastPlayedAt || a.downloadedAt || 0;
+        const timeB = b.lastPlayedAt || b.downloadedAt || 0;
+        if (timeA !== timeB) return timeA - timeB;
+        return (a.playCount || 0) - (b.playCount || 0);
+      });
+
+      const countToEvict = Math.min(targetCleanCount, sorted.length);
+      const candidates = sorted.slice(0, countToEvict);
+      let freedBytes = 0;
+      const evictedIds: string[] = [];
+
+      for (const cand of candidates) {
+        try {
+          const size = cand.blob?.size || cand.sizeBytes || 0;
+          await dbManager.executeWithRetry((idb) => idb.delete('offline_tracks', cand.videoId));
+          offlineTrackIdsCache.delete(cand.videoId);
+          freedBytes += size;
+          evictedIds.push(cand.videoId);
+        } catch {}
+      }
+
+      if (evictedIds.length > 0) {
+        console.info(
+          `[IDB LRU Eviction] Evicted ${evictedIds.length} offline tracks to preserve storage quota. Freed ${(freedBytes / (1024 * 1024)).toFixed(2)} MB.`
+        );
+      }
+
+      return { evictedCount: evictedIds.length, freedBytes };
+    } catch (err) {
+      console.warn('[IDB] LRU Eviction encountered an issue:', err);
+      return { evictedCount: 0, freedBytes: 0 };
     }
   },
 
@@ -738,13 +1101,15 @@ export const db = {
       'saved_albums',
       'recent_searches',
       'offline_tracks',
+      'metadata_cache',
+      'offline_search_tokens',
     ] as const;
 
     try {
       await dbManager.executeWithRetry(async (idb) => {
         for (const s of stores) {
           try {
-            await idb.clear(s);
+            await idb.clear(s as any);
           } catch {}
         }
       });
@@ -753,6 +1118,214 @@ export const db = {
       console.warn('[IDB] Failed to clear all IndexedDB stores:', err);
       return false;
     }
+  },
+
+  /**
+   * Health & diagnostics metadata inspection (Batch 3 - Poin 76)
+   */
+  async getDatabaseInfo(): Promise<{
+    name: string;
+    version: number;
+    isHealthy: boolean;
+    counts: Record<string, number>;
+  }> {
+    if (typeof window === 'undefined') {
+      return { name: DB_NAME, version: DB_VERSION, isHealthy: false, counts: {} };
+    }
+    try {
+      return await dbManager.executeWithRetry(async (idb) => {
+        const counts: Record<string, number> = {};
+        const stores = [
+          'playlists',
+          'liked_songs',
+          'subscribed_artists',
+          'saved_albums',
+          'offline_tracks',
+          'metadata_cache',
+        ] as const;
+
+        for (const s of stores) {
+          try {
+            counts[s] = await idb.count(s as any);
+          } catch {
+            counts[s] = 0;
+          }
+        }
+
+        return {
+          name: DB_NAME,
+          version: DB_VERSION,
+          isHealthy: true,
+          counts,
+        };
+      });
+    } catch {
+      return { name: DB_NAME, version: DB_VERSION, isHealthy: false, counts: {} };
+    }
+  },
+
+  /**
+   * Offline Local Full-Text Search Indexing (Batch 3 - Poin 72)
+   * Evaluates title, artist, and playlist names locally without server dependency
+   */
+  async searchLocalOffline(query: string, limit = 25): Promise<Track[]> {
+    if (!query || typeof query !== 'string') return [];
+    const normalized = query.trim().toLowerCase();
+    if (!normalized) return [];
+
+    try {
+      const offlineItems = await this.getOfflineTracks();
+      const results: { track: Track; score: number }[] = [];
+
+      for (const item of offlineItems) {
+        if (!item.track) continue;
+        const track = item.track;
+        const title = (track.name || '').toLowerCase();
+        const artist = Array.isArray(track.artist)
+          ? track.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).join(' ').toLowerCase()
+          : (track.artist?.name || '').toLowerCase();
+
+        let score = 0;
+        if (title === normalized) score += 100;
+        else if (title.startsWith(normalized)) score += 50;
+        else if (title.includes(normalized)) score += 30;
+
+        if (artist === normalized) score += 40;
+        else if (artist.includes(normalized)) score += 20;
+
+        if (score > 0) {
+          results.push({ track, score });
+        }
+      }
+
+      // Sort by highest match score
+      results.sort((a, b) => b.score - a.score);
+      return results.slice(0, limit).map((r) => r.track);
+    } catch (err) {
+      console.warn('[IDB LocalSearch] Failed to search offline tracks:', err);
+      return [];
+    }
+  },
+
+  /**
+   * Poin 64: Memory-Bound Cache Compression
+   * Stores structured data or text into 'metadata_cache' with native GZIP compression
+   * to conserve browser storage quota and RAM.
+   */
+  async setMetadataCache(
+    key: string,
+    data: any,
+    ttlMs: number = 7 * 24 * 60 * 60 * 1000 // default 7 days
+  ): Promise<void> {
+    if (typeof window === 'undefined' || !key) return;
+    try {
+      let isCompressed = false;
+      let storedData: any = data;
+
+      // Compress if payload is string or object larger than 256 bytes
+      const jsonStr = typeof data === 'string' ? data : JSON.stringify(data);
+      if (jsonStr.length > 256) {
+        try {
+          storedData = await compressString(jsonStr);
+          isCompressed = true;
+        } catch {
+          storedData = data;
+        }
+      }
+
+      const now = Date.now();
+      const expiresAt = now + ttlMs;
+      const dataStr = typeof storedData === 'string' ? storedData : JSON.stringify(storedData);
+
+      await dbManager.executeWithRetry((idb) =>
+        idb.put('metadata_cache', {
+          key,
+          data: dataStr,
+          compressed: isCompressed,
+          byteLength: dataStr.length,
+          updatedAt: now,
+          expiresAt,
+        })
+      );
+    } catch (err) {
+      console.warn(`[IDB MetadataCache] Failed to set cache for ${key}:`, err);
+    }
+  },
+
+  /**
+   * Poin 64: Decompresses and retrieves cached metadata or lyrics from 'metadata_cache'.
+   */
+  async getMetadataCache<T = any>(key: string): Promise<T | null> {
+    if (typeof window === 'undefined' || !key) return null;
+    try {
+      const entry = await dbManager.executeWithRetry((idb) => idb.get('metadata_cache', key));
+      if (!entry) return null;
+
+      // TTL Check
+      if (entry.expiresAt && Date.now() > entry.expiresAt) {
+        dbManager.executeWithRetry((idb) => idb.delete('metadata_cache', key)).catch(() => {});
+        return null;
+      }
+
+      if (entry.compressed && typeof entry.data === 'string') {
+        const decompressedStr = await decompressString(entry.data);
+        try {
+          return JSON.parse(decompressedStr) as T;
+        } catch {
+          return decompressedStr as unknown as T;
+        }
+      }
+
+      return entry.data as T;
+    } catch (err) {
+      console.warn(`[IDB MetadataCache] Failed to get cache for ${key}:`, err);
+      return null;
+    }
+  },
+
+  async deleteMetadataCache(key: string): Promise<void> {
+    if (typeof window === 'undefined' || !key) return;
+    try {
+      await dbManager.executeWithRetry((idb) => idb.delete('metadata_cache', key));
+    } catch {}
+  },
+
+  /**
+   * Poin 91: Automated IndexedDB Blob & Cache Pruning
+   * Periodically purges expired metadata cache items and cleans orphan storage fragments.
+   */
+  async pruneExpiredBlobsAndCache(): Promise<{
+    prunedMetadataCount: number;
+    prunedTracksCount: number;
+  }> {
+    if (typeof window === 'undefined') return { prunedMetadataCount: 0, prunedTracksCount: 0 };
+    let prunedMetadataCount = 0;
+    let prunedTracksCount = 0;
+
+    try {
+      const now = Date.now();
+      const allCache = await dbManager.executeWithRetry((idb) => idb.getAll('metadata_cache'));
+      for (const entry of allCache) {
+        if (entry.expiresAt && now > entry.expiresAt) {
+          await dbManager.executeWithRetry((idb) => idb.delete('metadata_cache', entry.key));
+          prunedMetadataCount++;
+        }
+      }
+
+      // Check for zero-byte or corrupt offline tracks
+      const allTracks = await dbManager.executeWithRetry((idb) => idb.getAll('offline_tracks'));
+      for (const t of allTracks) {
+        if (!t.blob || (t.blob.size && t.blob.size < 512)) {
+          await dbManager.executeWithRetry((idb) => idb.delete('offline_tracks', t.videoId));
+          offlineTrackIdsCache.delete(t.videoId);
+          prunedTracksCount++;
+        }
+      }
+    } catch (err) {
+      console.warn('[IDB Pruner] Pruning encountered non-fatal error:', err);
+    }
+
+    return { prunedMetadataCount, prunedTracksCount };
   },
 };
 

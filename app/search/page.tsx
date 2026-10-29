@@ -4,9 +4,13 @@ import { useState, useEffect, useMemo, useCallback } from 'react';
 import { db, RecentSearch } from '@/lib/db';
 import { TrackItem } from '@/components/TrackItem';
 import { ArtistItem } from '@/components/ArtistItem';
+import { VirtualTrackList } from '@/components/VirtualTrackList';
 import { Search as SearchIcon, ArrowLeft, X, ArrowUpLeft, History } from 'lucide-react';
 import { useRouter } from 'next/navigation';
 import { SearchSkeleton } from '@/components/SearchSkeleton';
+import { useDebounce } from '@/hooks/usePerformance';
+
+import { deduplicatedFetch } from '@/lib/clientDeduplication';
 
 export default function Search() {
   const [query, setQuery] = useState('');
@@ -33,34 +37,53 @@ export default function Search() {
   }, [results, activeTab]);
 
   useEffect(() => {
+    let mounted = true;
     const loadRecentSearches = async () => {
       const searches = await db.getRecentSearches();
-      setRecentSearches(searches);
+      if (mounted) setRecentSearches(searches);
     };
     loadRecentSearches();
+    return () => {
+      mounted = false;
+    };
   }, []);
 
+  const debouncedQuery = useDebounce(query, 250);
+
   useEffect(() => {
+    let active = true;
+    const controller = new AbortController();
+
     const fetchSuggestions = async () => {
-      if (query.trim()) {
+      if (debouncedQuery.trim()) {
         try {
-          const res = await fetch(`/api/suggest?q=${encodeURIComponent(query)}`);
-          if (res.ok) {
-            const raw = await res.json();
-            const data = Array.isArray(raw) ? raw : (raw?.result || []);
+          const raw = await deduplicatedFetch(
+            `/api/suggest?q=${encodeURIComponent(debouncedQuery)}`,
+            { signal: controller.signal },
+            10000
+          );
+          if (active) {
+            const data = Array.isArray(raw) ? raw : raw?.result || [];
             setSuggestions(data);
           }
-        } catch {
-          setSuggestions([]);
+        } catch (err: any) {
+          if (err?.name !== 'AbortError' && active) {
+            setSuggestions([]);
+          }
         }
       } else {
-        setSuggestions([]);
+        if (active) setSuggestions([]);
       }
     };
 
-    const debounceTimer = setTimeout(fetchSuggestions, 300);
-    return () => clearTimeout(debounceTimer);
-  }, [query]);
+    fetchSuggestions();
+    return () => {
+      active = false;
+      try {
+        controller.abort();
+      } catch {}
+    };
+  }, [debouncedQuery]);
 
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) return;
@@ -72,35 +95,35 @@ export default function Search() {
     const searches = await db.getRecentSearches();
     setRecentSearches(searches);
 
-    // If offline: search locally within downloaded IndexedDB tracks
+    // If offline: search locally within downloaded IndexedDB tracks (Batch 3 - Poin 72)
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       try {
-        const offlineItems = await db.getOfflineTracks();
-        const q = searchQuery.toLowerCase();
-        const matched = offlineItems
-          .filter((it) => {
-            const name = it.track?.name?.toLowerCase() || '';
-            const artist = Array.isArray(it.track?.artist)
-              ? it.track.artist.map((a: any) => a.name).join(' ').toLowerCase()
-              : it.track?.artist?.name?.toLowerCase() || '';
-            return name.includes(q) || artist.includes(q);
-          })
-          .map((it) => it.track);
-        setResults(matched);
-      } catch {}
+        const localMatches = await db.searchLocalOffline(searchQuery);
+        setResults(localMatches);
+      } catch (err) {
+        console.warn('Offline local search failed:', err);
+      }
       setLoading(false);
       return;
     }
 
     try {
-      const res = await fetch(`/api/search?q=${encodeURIComponent(searchQuery)}`);
-      if (res.ok) {
-        const raw = await res.json();
-        const data = Array.isArray(raw) ? raw : raw?.result || [];
-        setResults(data);
-      }
+      const raw = await deduplicatedFetch(
+        `/api/search?q=${encodeURIComponent(searchQuery)}`,
+        undefined,
+        30000 // 30 seconds client deduplication cache
+      );
+      const data = Array.isArray(raw) ? raw : raw?.result || [];
+      setResults(data);
     } catch (error) {
-      console.error(error);
+      console.error('Search request error:', error);
+      // Fallback to local offline tracks if online search fails
+      try {
+        const localFallback = await db.searchLocalOffline(searchQuery);
+        if (localFallback.length > 0) {
+          setResults(localFallback);
+        }
+      } catch {}
     } finally {
       setLoading(false);
     }
@@ -236,8 +259,10 @@ export default function Search() {
         {loading ? (
           <SearchSkeleton />
         ) : displayedResults.length > 0 ? (
-          <div className="space-y-1">
-            {displayedResults.map((item, index) =>
+          <VirtualTrackList
+            tracks={displayedResults}
+            queue={tracksQueue}
+            renderItem={(item: any, index: number) =>
               item.type === 'ARTIST' ? (
                 <ArtistItem key={`artist-${item.artistId}-${index}`} artist={item} />
               ) : (
@@ -248,8 +273,8 @@ export default function Search() {
                   index={index}
                 />
               )
-            )}
-          </div>
+            }
+          />
         ) : query ? (
           <div className="flex flex-col items-center justify-center mt-20 text-white/50 space-y-3">
             <SearchIcon className="w-16 h-16 opacity-20" />

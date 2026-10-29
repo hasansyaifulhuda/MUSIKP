@@ -1,7 +1,8 @@
 import { create } from 'zustand';
-import { persist } from 'zustand/middleware';
+import { persist, createJSONStorage } from 'zustand/middleware';
 import { toast } from '@/lib/toast';
 import { playTrackImmediately } from './audioElement';
+import { debouncedStorage } from './debouncedStorage';
 
 export interface Track {
   videoId: string;
@@ -170,6 +171,9 @@ interface PlayerState {
   setDuration: (duration: number) => void;
   setVolume: (volume: number) => void;
   addToQueue: (track: any) => void;
+  insertNextInQueue: (track: any) => void;
+  moveQueueItem: (fromIndex: number, toIndex: number) => void;
+  reorderQueue: (newQueue: Track[]) => void;
   setTrackToAdd: (track: any | null) => void;
   setDominantColor: (color: string | null) => void;
   toggleShuffle: () => void;
@@ -530,6 +534,80 @@ export const usePlayerStore = create<PlayerState>()(
         }));
         toast.success(`"${track.name}" ditambahkan ke antrean`);
       },
+      insertNextInQueue: (rawTrack) => {
+        const id = extractVideoId(rawTrack);
+        if (!rawTrack || !id) return;
+        const track = normalizeTrack(rawTrack);
+        set((state) => {
+          if (state.queue.length === 0 || state.queueIndex === -1) {
+            return {
+              queue: [track],
+              originalQueue: [track],
+              queueIndex: 0,
+            };
+          }
+          const insertIdx = state.queueIndex + 1;
+          const nextQueue = [...state.queue];
+          nextQueue.splice(insertIdx, 0, track);
+
+          const nextOrig = [...state.originalQueue];
+          const origInsertIdx = Math.min(nextOrig.length, insertIdx);
+          nextOrig.splice(origInsertIdx, 0, track);
+
+          return {
+            queue: nextQueue,
+            originalQueue: nextOrig,
+          };
+        });
+        toast.success(`"${track.name}" akan diputar berikutnya`);
+      },
+      moveQueueItem: (fromIndex, toIndex) => {
+        set((state) => {
+          if (
+            fromIndex < 0 ||
+            fromIndex >= state.queue.length ||
+            toIndex < 0 ||
+            toIndex >= state.queue.length ||
+            fromIndex === toIndex
+          ) {
+            return state;
+          }
+
+          const newQueue = [...state.queue];
+          const [movedItem] = newQueue.splice(fromIndex, 1);
+          newQueue.splice(toIndex, 0, movedItem);
+
+          let newIndex = state.queueIndex;
+          if (state.queueIndex === fromIndex) {
+            newIndex = toIndex;
+          } else if (fromIndex < state.queueIndex && toIndex >= state.queueIndex) {
+            newIndex = state.queueIndex - 1;
+          } else if (fromIndex > state.queueIndex && toIndex <= state.queueIndex) {
+            newIndex = state.queueIndex + 1;
+          }
+
+          return {
+            queue: newQueue,
+            queueIndex: newIndex,
+          };
+        });
+      },
+      reorderQueue: (newQueue) => {
+        set((state) => {
+          const currentTrack = state.currentTrack;
+          let newIndex = state.queueIndex;
+          if (currentTrack?.videoId) {
+            const foundIndex = newQueue.findIndex((t) => t.videoId === currentTrack.videoId);
+            if (foundIndex !== -1) {
+              newIndex = foundIndex;
+            }
+          }
+          return {
+            queue: newQueue,
+            queueIndex: newIndex,
+          };
+        });
+      },
       setTrackToAdd: (rawTrack) => {
         const id = extractVideoId(rawTrack);
         const track = rawTrack && id ? normalizeTrack(rawTrack) : null;
@@ -595,6 +673,7 @@ export const usePlayerStore = create<PlayerState>()(
     }),
     {
       name: 'player-storage',
+      storage: createJSONStorage(() => debouncedStorage),
       onRehydrateStorage: () => (state) => {
         if (state) {
           // Always ensure the player hydrates in paused & ready state

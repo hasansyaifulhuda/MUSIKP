@@ -1,11 +1,13 @@
 'use client';
 
-import React, { memo, useCallback, useMemo } from 'react';
+import React, { memo, useCallback, useMemo, useRef, useEffect } from 'react';
 import { Track, usePlayerStore } from '@/lib/store';
 import { MoreHorizontal, Trash2, Play } from 'lucide-react';
 import Image from 'next/image';
 import { getHighResImage } from '@/lib/utils';
 import { MarqueeText } from './MarqueeText';
+import { Equalizer } from './Equalizer';
+import { useContextMenuStore } from '@/lib/contextMenuStore';
 
 interface TrackItemProps {
   track: Track;
@@ -33,7 +35,18 @@ export const TrackItem = memo(function TrackItem({
   const isPlayingCurrent = usePlayerStore(
     (state) => state.isPlaying && state.currentTrack?.videoId === track.videoId
   );
-  const setTrackToAdd = usePlayerStore((state) => state.setTrackToAdd);
+  const openContextMenu = useContextMenuStore((state) => state.openContextMenu);
+
+  // Touch long-press refs
+  const touchTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const touchStartPosRef = useRef<{ x: number; y: number }>({ x: 0, y: 0 });
+  const didLongPressRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    return () => {
+      if (touchTimerRef.current) clearTimeout(touchTimerRef.current);
+    };
+  }, []);
 
   const thumbnail = useMemo(
     () => getHighResImage(track.thumbnails?.[track.thumbnails.length - 1]?.url, 120),
@@ -48,15 +61,68 @@ export const TrackItem = memo(function TrackItem({
   }, [track.artist]);
 
   const handleClick = useCallback(() => {
+    if (didLongPressRef.current) {
+      didLongPressRef.current = false;
+      return;
+    }
     playTrack(track, queue, 'playlist', index);
   }, [playTrack, track, queue, index]);
+
+  const handleContextMenu = useCallback(
+    (e: React.MouseEvent) => {
+      e.preventDefault();
+      e.stopPropagation();
+      openContextMenu(track, { x: e.clientX, y: e.clientY });
+    },
+    [openContextMenu, track]
+  );
+
+  const handleTouchStart = useCallback(
+    (e: React.TouchEvent) => {
+      const touch = e.touches[0];
+      if (!touch) return;
+      touchStartPosRef.current = { x: touch.clientX, y: touch.clientY };
+      didLongPressRef.current = false;
+
+      if (touchTimerRef.current) clearTimeout(touchTimerRef.current);
+      touchTimerRef.current = setTimeout(() => {
+        didLongPressRef.current = true;
+        if (typeof navigator !== 'undefined' && 'vibrate' in navigator) {
+          navigator.vibrate?.(35);
+        }
+        openContextMenu(track, { x: touchStartPosRef.current.x, y: touchStartPosRef.current.y });
+      }, 480);
+    },
+    [openContextMenu, track]
+  );
+
+  const handleTouchMove = useCallback((e: React.TouchEvent) => {
+    const touch = e.touches[0];
+    if (!touch) return;
+    const dx = Math.abs(touch.clientX - touchStartPosRef.current.x);
+    const dy = Math.abs(touch.clientY - touchStartPosRef.current.y);
+    if (dx > 10 || dy > 10) {
+      if (touchTimerRef.current) {
+        clearTimeout(touchTimerRef.current);
+        touchTimerRef.current = null;
+      }
+    }
+  }, []);
+
+  const handleTouchEnd = useCallback(() => {
+    if (touchTimerRef.current) {
+      clearTimeout(touchTimerRef.current);
+      touchTimerRef.current = null;
+    }
+  }, []);
 
   const handleOptionsClick = useCallback(
     (e: React.MouseEvent) => {
       e.stopPropagation();
-      setTrackToAdd(track);
+      const rect = (e.currentTarget as HTMLElement).getBoundingClientRect();
+      openContextMenu(track, { x: rect.left - 140, y: rect.bottom + 6 });
     },
-    [setTrackToAdd, track]
+    [openContextMenu, track]
   );
 
   const handleRemoveClick = useCallback(
@@ -71,6 +137,11 @@ export const TrackItem = memo(function TrackItem({
     <div
       className="flex items-center p-2 md:p-2.5 hover:bg-white/10 rounded-md cursor-pointer group transition-colors select-none content-auto gpu-accelerated"
       onClick={handleClick}
+      onContextMenu={handleContextMenu}
+      onTouchStart={handleTouchStart}
+      onTouchMove={handleTouchMove}
+      onTouchEnd={handleTouchEnd}
+      onTouchCancel={handleTouchEnd}
     >
       {/* Optional Track Number on Desktop */}
       {index !== undefined && (
@@ -86,16 +157,14 @@ export const TrackItem = memo(function TrackItem({
           alt={track.name}
           fill
           sizes="44px"
-          loading="lazy"
+          priority={index !== undefined && index < 4}
+          loading={index !== undefined && index < 4 ? undefined : 'lazy'}
+          decoding="async"
           className="object-cover"
         />
         {isPlayingCurrent ? (
           <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
-            <div className="flex gap-0.5 items-end h-3.5">
-              <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_0ms]" />
-              <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_200ms]" />
-              <div className="w-1 bg-[#1DB954] animate-[bounce_0.8s_infinite_400ms]" />
-            </div>
+            <Equalizer size="sm" />
           </div>
         ) : (
           <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">

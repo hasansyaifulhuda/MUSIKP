@@ -4,9 +4,10 @@ import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { db } from '@/lib/db';
 import { usePlayerStore, Track } from '@/lib/store';
-import { Play, ArrowLeft, Radio, Music, Trash2, BookmarkPlus, BookmarkCheck, Shuffle, Share2 } from 'lucide-react';
+import { Play, ArrowLeft, Radio, Music, Trash2, BookmarkPlus, BookmarkCheck, Shuffle, Share2, Pencil } from 'lucide-react';
 import Image from 'next/image';
 import { TrackItem } from '@/components/TrackItem';
+import { VirtualTrackList } from '@/components/VirtualTrackList';
 import { PlaylistSkeleton } from '@/components/PlaylistSkeleton';
 import { MarqueeText } from '@/components/MarqueeText';
 import { toast } from '@/lib/toast';
@@ -24,6 +25,8 @@ export default function PlaylistPage() {
   const [playlist, setPlaylist] = useState<Playlist | null>(null);
   const [loading, setLoading] = useState(true);
   const [isSaved, setIsSaved] = useState(false);
+  const [isEditingName, setIsEditingName] = useState(false);
+  const [editedName, setEditedName] = useState('');
   const playTrack = usePlayerStore((state) => state.playTrack);
 
   useEffect(() => {
@@ -159,7 +162,21 @@ export default function PlaylistPage() {
     }
   };
 
-  const isSelfCreated = /^\d+$/.test(playlist.id);
+  const handleOpenRename = () => {
+    setEditedName(playlist.name);
+    setIsEditingName(true);
+  };
+
+  const handleSaveRename = async () => {
+    if (!editedName.trim()) return;
+    const clean = editedName.trim();
+    await db.updatePlaylist(playlist.id, { name: clean });
+    setPlaylist((prev) => (prev ? { ...prev, name: clean } : null));
+    setIsEditingName(false);
+    toast.success('Nama playlist berhasil diperbarui');
+  };
+
+  const isSelfCreated = isSaved || /^\d+$/.test(playlist.id) || playlist.id.startsWith('playlist_');
 
   return (
     <main className="min-h-screen pb-32 max-w-5xl mx-auto px-4 md:px-8 pt-4">
@@ -202,9 +219,47 @@ export default function PlaylistPage() {
           <span className="text-xs font-bold uppercase tracking-wider text-[#b3b3b3]">
             {isSelfCreated ? 'Playlist Kustom' : 'Playlist Pilihan'}
           </span>
-          <h1 className="text-2xl md:text-4xl lg:text-5xl font-black text-white tracking-tight mt-1 mb-2 leading-tight">
-            {playlist.name}
-          </h1>
+
+          {isEditingName ? (
+            <div className="flex items-center gap-2 mt-2 mb-3">
+              <input
+                type="text"
+                value={editedName}
+                onChange={(e) => setEditedName(e.target.value)}
+                onKeyDown={(e) => e.key === 'Enter' && handleSaveRename()}
+                autoFocus
+                className="bg-white/10 text-white text-xl md:text-2xl font-bold px-3 py-1.5 rounded-lg border border-white/20 focus:outline-none focus:border-[#1DB954] w-full max-w-md"
+              />
+              <button
+                onClick={handleSaveRename}
+                className="px-4 py-2 bg-[#1DB954] text-black font-bold text-sm rounded-lg hover:scale-105 transition-all cursor-pointer"
+              >
+                Simpan
+              </button>
+              <button
+                onClick={() => setIsEditingName(false)}
+                className="px-3 py-2 bg-white/10 text-white font-semibold text-sm rounded-lg hover:bg-white/20 transition-all cursor-pointer"
+              >
+                Batal
+              </button>
+            </div>
+          ) : (
+            <div className="flex items-center justify-center md:justify-start gap-3 mt-1 mb-2">
+              <h1 className="text-2xl md:text-4xl lg:text-5xl font-black text-white tracking-tight leading-tight">
+                {playlist.name}
+              </h1>
+              {isSelfCreated && (
+                <button
+                  onClick={handleOpenRename}
+                  className="p-1.5 text-white/60 hover:text-white bg-white/5 hover:bg-white/15 rounded-full transition-colors cursor-pointer"
+                  title="Ubah Nama Playlist"
+                >
+                  <Pencil className="w-4 h-4" />
+                </button>
+              )}
+            </div>
+          )}
+
           <p className="text-[#b3b3b3] text-xs md:text-sm mb-5">{playlist.tracks.length} lagu</p>
 
           <div className="flex items-center justify-center md:justify-start gap-3.5 flex-wrap">
@@ -268,17 +323,11 @@ export default function PlaylistPage() {
             <p className="text-xs text-white/40">Gunakan tombol opsi pada lagu apa saja untuk menambahkannya ke sini.</p>
           </div>
         ) : (
-          <div className="space-y-1">
-            {playlist.tracks.map((track, index) => (
-              <TrackItem
-                key={`${track.videoId}-${index}`}
-                track={track}
-                queue={playlist.tracks}
-                index={index}
-                onRemove={isSelfCreated ? handleRemoveSong : undefined}
-              />
-            ))}
-          </div>
+          <VirtualTrackList
+            tracks={playlist.tracks}
+            queue={playlist.tracks}
+            onRemove={isSelfCreated ? handleRemoveSong : undefined}
+          />
         )}
       </div>
     </main>

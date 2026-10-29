@@ -1,7 +1,7 @@
 {
-  "name": "PMUSIC",
-  "short_name": "PMUSIC",
-  "description": "PMUSIC - Your Ultimate Music Player dengan lirik tersinkronisasi, pemutaran latar belakang, dan mode offline.",
+  "name": "MusicFY",
+  "short_name": "MusicFY",
+  "description": "MusicFY - Pemutar Musik dengan lirik tersinkronisasi, pemutaran latar belakang, dan mode offline.",
   "start_url": "/",
   "id": "/",
   "scope": "/",

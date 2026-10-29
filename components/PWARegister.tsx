@@ -10,18 +10,40 @@ declare global {
 
 export function PWARegister() {
   useEffect(() => {
-    // Purge outdated service worker caches from browser storage
+    // 1. In Development Mode: Proactively unregister any active Service Worker
+    // This prevents stale webpack dev chunks, fast-refresh reload loops, and routing collisions
+    if (process.env.NODE_ENV !== 'production') {
+      if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then((registrations) => {
+          for (const reg of registrations) {
+            reg.unregister().catch(() => {});
+          }
+        });
+      }
+      if (typeof window !== 'undefined' && 'caches' in window) {
+        caches.keys().then((keys) => {
+          keys.forEach((key) => {
+            if (key.startsWith('pmusic-') || key.startsWith('musicfy-')) {
+              caches.delete(key).catch(() => {});
+            }
+          });
+        });
+      }
+      return;
+    }
+
+    // 2. In Production Mode: Purge legacy PMUSIC caches
     if (typeof window !== 'undefined' && 'caches' in window) {
       caches.keys().then((keys) => {
         keys.forEach((key) => {
-          if (!key.startsWith('pmusic-')) {
+          if (!key.startsWith('musicfy-')) {
             caches.delete(key).catch(() => {});
           }
         });
       });
     }
 
-    // Register service worker cleanly without aggressive update loops
+    // 3. Register production service worker cleanly
     if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
       navigator.serviceWorker
         .register('/sw.js')

@@ -4,6 +4,7 @@ import { useEffect, useRef, useCallback, useState } from 'react';
 
 /**
  * Hook to debounce a rapidly changing state or value (e.g. search input or window dimensions).
+ * Master Blueprint PMUSIC Architecture - Phase 1.2 (Point 8)
  */
 export function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState<T>(value);
@@ -22,11 +23,50 @@ export function useDebounce<T>(value: T, delay: number): T {
 }
 
 /**
- * Hook to throttle a callback invocation.
+ * Hook to debounce a callback invocation cleanly.
  */
-export function useThrottleCallback<T extends (...args: any[]) => void>(callback: T, limit: number): T {
+export function useDebouncedCallback<T extends (...args: any[]) => void>(
+  callback: T,
+  delay: number
+): (...args: Parameters<T>) => void {
+  const callbackRef = useRef(callback);
+  const timerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  useEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
+
+  useEffect(() => {
+    return () => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+    };
+  }, []);
+
+  return useCallback(
+    (...args: Parameters<T>) => {
+      if (timerRef.current) clearTimeout(timerRef.current);
+      timerRef.current = setTimeout(() => {
+        callbackRef.current(...args);
+      }, delay);
+    },
+    [delay]
+  );
+}
+
+/**
+ * Hook to throttle a callback invocation (e.g. for high-frequency scroll or resize events).
+ */
+export function useThrottleCallback<T extends (...args: any[]) => void>(
+  callback: T,
+  limit: number
+): (...args: Parameters<T>) => void {
   const lastRan = useRef<number>(0);
   const handlerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const callbackRef = useRef(callback);
+
+  useEffect(() => {
+    callbackRef.current = callback;
+  }, [callback]);
 
   useEffect(() => {
     return () => {
@@ -35,21 +75,49 @@ export function useThrottleCallback<T extends (...args: any[]) => void>(callback
   }, []);
 
   return useCallback(
-    ((...args: any[]) => {
+    (...args: Parameters<T>) => {
       const now = Date.now();
       if (now - lastRan.current >= limit) {
-        callback(...args);
+        callbackRef.current(...args);
         lastRan.current = now;
       } else {
         if (handlerRef.current) clearTimeout(handlerRef.current);
         handlerRef.current = setTimeout(() => {
-          callback(...args);
+          callbackRef.current(...args);
           lastRan.current = Date.now();
         }, limit - (now - lastRan.current));
       }
-    }) as T,
-    [callback, limit]
+    },
+    [limit]
   );
+}
+
+/**
+ * Hook for throttled scroll event listeners on window or scrollable container.
+ */
+export function useThrottledScroll(
+  onScroll: (scrollTop: number, event: Event) => void,
+  limit: number = 50,
+  targetElement?: HTMLElement | null
+) {
+  const throttledHandler = useThrottleCallback(onScroll, limit);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') return;
+
+    const target: EventTarget = targetElement || window;
+    const handleScroll = (e: Event) => {
+      const top = targetElement
+        ? targetElement.scrollTop
+        : window.scrollY || document.documentElement.scrollTop;
+      throttledHandler(top, e);
+    };
+
+    target.addEventListener('scroll', handleScroll, { passive: true });
+    return () => {
+      target.removeEventListener('scroll', handleScroll);
+    };
+  }, [throttledHandler, targetElement]);
 }
 
 /**

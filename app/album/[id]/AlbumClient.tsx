@@ -59,7 +59,7 @@ export default function AlbumClient({ album }: { album: any }) {
     if (typeof navigator !== 'undefined' && navigator.share) {
       try {
         await navigator.share({
-          title: album?.name || 'Album PMUSIC',
+          title: album?.name || 'Album MusicFY',
           url: window.location.href,
         });
         return;

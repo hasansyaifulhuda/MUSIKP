@@ -15,14 +15,23 @@ interface PlaylistData {
   videos: Track[];
 }
 
+const cardCache = new Map<string, PlaylistData>();
+
 export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playlistId }: { playlistId: string }) {
-  const [playlist, setPlaylist] = useState<PlaylistData | null>(null);
-  const [loading, setLoading] = useState(true);
+  const cached = cardCache.get(playlistId);
+  const [playlist, setPlaylist] = useState<PlaylistData | null>(cached || null);
+  const [loading, setLoading] = useState(!cached);
   const [added, setAdded] = useState(false);
   const router = useRouter();
   const playTrack = usePlayerStore((state) => state.playTrack);
 
   useEffect(() => {
+    if (cardCache.has(playlistId)) {
+      setPlaylist(cardCache.get(playlistId)!);
+      setLoading(false);
+      return;
+    }
+
     let active = true;
     const fetchPlaylist = async () => {
       try {
@@ -30,11 +39,13 @@ export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playl
         if (res.ok) {
           const raw = await res.json();
           const data = raw?.result !== undefined ? raw.result : raw;
+          const formatted: PlaylistData = {
+            ...data,
+            videos: data.videos || data.songs || [],
+          };
+          cardCache.set(playlistId, formatted);
           if (active) {
-            setPlaylist({
-              ...data,
-              videos: data.videos || data.songs || [],
-            });
+            setPlaylist(formatted);
           }
         }
       } catch (error) {
@@ -129,6 +140,8 @@ export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playl
                     alt={track.name}
                     fill
                     sizes="40px"
+                    loading="lazy"
+                    decoding="async"
                     className="object-cover"
                   />
                 </div>
@@ -140,6 +153,8 @@ export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playl
               alt={playlist.name}
               fill
               sizes="80px"
+              loading="lazy"
+              decoding="async"
               className="object-cover"
             />
           )}
@@ -159,6 +174,8 @@ export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playl
                 alt={track.name}
                 fill
                 sizes="36px"
+                loading="lazy"
+                decoding="async"
                 className="object-cover"
               />
             </div>

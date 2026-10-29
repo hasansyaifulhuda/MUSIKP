@@ -170,7 +170,15 @@ export default function Top50Page() {
                 {index + 1}
               </div>
               <div className="relative w-11 h-11 rounded-[4px] overflow-hidden shrink-0 shadow bg-white/5">
-                <Image src={thumb} alt={track.name} fill sizes="44px" className="object-cover" />
+                <Image
+                  src={thumb}
+                  alt={track.name}
+                  fill
+                  sizes="44px"
+                  loading="lazy"
+                  decoding="async"
+                  className="object-cover"
+                />
                 <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
                   <Play className="w-4 h-4 fill-white text-white ml-0.5" />
                 </div>

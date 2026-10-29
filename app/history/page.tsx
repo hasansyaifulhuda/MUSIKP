@@ -21,7 +21,6 @@ export default function HistoryPage() {
   const [showConfirmClear, setShowConfirmClear] = useState(false);
 
   useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect
     setMounted(true);
   }, []);
 
@@ -62,7 +61,7 @@ export default function HistoryPage() {
     return ` • ${m}:${s.toString().padStart(2, '0')}`;
   };
 
-  const renderTrackItem = (item: { track: Track; playedAt: number }) => {
+  const renderTrackItem = (item: { track: Track; playedAt: number }, index: number) => {
     const track = item.track;
     const artistName = Array.isArray(track.artist)
       ? track.artist.map((a: any) => a.name).join(', ')
@@ -76,7 +75,16 @@ export default function HistoryPage() {
         onClick={() => playTrack(track, filteredHistory.map((h) => h.track))}
       >
         <div className="relative w-12 h-12 rounded-lg overflow-hidden shrink-0 shadow-md bg-white/5">
-          <Image src={thumbnail} alt={track.name} fill sizes="56px" className="object-cover" />
+          <Image
+            src={thumbnail}
+            alt={track.name}
+            fill
+            sizes="56px"
+            priority={index < 4}
+            loading={index < 4 ? undefined : 'lazy'}
+            decoding="async"
+            className="object-cover"
+          />
           <div className="absolute inset-0 bg-black/40 opacity-0 group-hover:opacity-100 flex items-center justify-center transition-opacity">
             <Play className="w-5 h-5 fill-white text-white ml-0.5" />
           </div>
@@ -96,7 +104,7 @@ export default function HistoryPage() {
             e.stopPropagation();
             removeFromHistory(track.videoId, item.playedAt);
           }}
-          className="p-2 text-white/40 hover:text-red-400 hover:bg-white/10 rounded-full transition-colors opacity-0 group-hover:opacity-100"
+          className="p-2 text-white/40 hover:text-red-400 hover:bg-white/10 rounded-full transition-colors opacity-0 group-hover:opacity-100 cursor-pointer"
           title="Hapus dari riwayat"
           aria-label="Hapus dari riwayat"
         >
@@ -113,7 +121,7 @@ export default function HistoryPage() {
         <div className="flex items-center gap-3">
           <button
             onClick={() => router.back()}
-            className="text-white hover:bg-white/10 p-2 rounded-full transition-colors"
+            className="text-white hover:bg-white/10 p-2 rounded-full transition-colors cursor-pointer"
             aria-label="Kembali"
           >
             <ArrowLeft className="w-6 h-6" />
@@ -131,7 +139,7 @@ export default function HistoryPage() {
               setShowSearch(!showSearch);
               if (showSearch) setSearchQuery('');
             }}
-            className="text-white/80 hover:text-white hover:bg-white/10 p-2 rounded-full transition-colors"
+            className="text-white/80 hover:text-white hover:bg-white/10 p-2 rounded-full transition-colors cursor-pointer"
             title="Cari riwayat"
             aria-label="Cari riwayat"
           >
@@ -142,7 +150,7 @@ export default function HistoryPage() {
           {history.length > 0 && (
             <button
               onClick={() => setShowConfirmClear(true)}
-              className="px-3.5 py-1.5 bg-white/10 hover:bg-red-500/20 text-white hover:text-red-300 rounded-full text-xs font-semibold transition-all border border-white/10 hover:border-red-500/30 flex items-center gap-1.5"
+              className="px-3.5 py-1.5 bg-white/10 hover:bg-red-500/20 text-white hover:text-red-300 rounded-full text-xs font-semibold transition-all border border-white/10 hover:border-red-500/30 flex items-center gap-1.5 cursor-pointer"
               title="Hapus semua riwayat"
             >
               <Trash2 className="w-3.5 h-3.5" />
@@ -208,7 +216,7 @@ export default function HistoryPage() {
 
       {/* Confirmation Dialog for Clearing All History */}
       {showConfirmClear && (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in">
+        <div className="fixed inset-0 z-[150] flex items-center justify-center p-4 bg-black/70 backdrop-blur-sm animate-fade-in">
           <div className="bg-[#242424] border border-white/10 rounded-2xl p-6 max-w-sm w-full shadow-2xl text-center space-y-4">
             <div className="w-12 h-12 bg-red-500/10 text-red-400 rounded-full flex items-center justify-center mx-auto">
               <AlertCircle className="w-6 h-6" />
