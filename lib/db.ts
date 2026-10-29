@@ -45,6 +45,37 @@ export interface OfflineTrack {
   synced?: boolean;
 }
 
+/**
+ * Cross-realm Blob validation helper for Web and Android Capacitor WebViews.
+ * Handles Blobs, ArrayBuffers, and structured-clone objects without failing on realm mismatches.
+ */
+export function isBlobLike(b: any): boolean {
+  if (!b) return false;
+  if (typeof Blob !== 'undefined' && b instanceof Blob && b.size > 0) return true;
+  if (Object.prototype.toString.call(b) === '[object Blob]' && b.size > 0) return true;
+  if (b.constructor && b.constructor.name === 'Blob' && typeof b.size === 'number' && b.size > 0) return true;
+  if (typeof b.size === 'number' && b.size > 0 && typeof b.slice === 'function') return true;
+  if (b instanceof ArrayBuffer && b.byteLength > 0) return true;
+  if (b.buffer instanceof ArrayBuffer && b.buffer.byteLength > 0) return true;
+  return false;
+}
+
+/**
+ * Ensures any blob-like object or ArrayBuffer retrieved from IndexedDB is converted
+ * into a standard HTML5 Blob instance for seamless audio playback.
+ */
+export function ensureBlob(b: any): Blob {
+  if (typeof Blob !== 'undefined' && b instanceof Blob) return b;
+  if (b instanceof ArrayBuffer) return new Blob([b], { type: 'audio/mpeg' });
+  if (b?.buffer instanceof ArrayBuffer) return new Blob([b.buffer], { type: 'audio/mpeg' });
+  if (isBlobLike(b)) {
+    try {
+      return new Blob([b], { type: b.type || 'audio/mpeg' });
+    } catch {}
+  }
+  return b as Blob;
+}
+
 export interface PaginationOptions {
   offset?: number;
   limit?: number;
@@ -685,7 +716,14 @@ export const db = {
     if (typeof window === 'undefined') return [];
     try {
       const items = await dbManager.executeWithRetry((idb) => idb.getAll('offline_tracks'));
-      const validItems = items.filter((it) => it && it.blob && it.blob instanceof Blob && it.blob.size > 0);
+      const validItems = items
+        .filter((it) => it && it.track && (isBlobLike(it.blob) || (typeof it.sizeBytes === 'number' && it.sizeBytes > 0)))
+        .map((it) => {
+          if (it.blob && !(it.blob instanceof Blob)) {
+            it.blob = ensureBlob(it.blob);
+          }
+          return it;
+        });
       offlineTrackIdsCache.clear();
       validItems.forEach((it) => offlineTrackIdsCache.add(it.videoId));
       return validItems;
@@ -701,7 +739,14 @@ export const db = {
    */
   async getOfflineTracksPaged(options?: PaginationOptions): Promise<PaginatedResult<OfflineTrack>> {
     const res = await this.getPaged('offline_tracks', options);
-    const validItems = res.items.filter((it) => it && it.blob && it.blob instanceof Blob && it.blob.size > 0);
+    const validItems = res.items
+      .filter((it) => it && it.track && (isBlobLike(it.blob) || (typeof it.sizeBytes === 'number' && it.sizeBytes > 0)))
+      .map((it) => {
+        if (it.blob && !(it.blob instanceof Blob)) {
+          it.blob = ensureBlob(it.blob);
+        }
+        return it;
+      });
     validItems.forEach((it) => offlineTrackIdsCache.add(it.videoId));
     return {
       ...res,
@@ -770,7 +815,10 @@ export const db = {
     if (typeof window === 'undefined' || !videoId) return undefined;
     try {
       const item = await dbManager.executeWithRetry((idb) => idb.get('offline_tracks', videoId));
-      if (item && item.blob && item.blob instanceof Blob && item.blob.size > 0) {
+      if (item && item.track && (isBlobLike(item.blob) || (typeof item.sizeBytes === 'number' && item.sizeBytes > 0))) {
+        if (item.blob && !(item.blob instanceof Blob)) {
+          item.blob = ensureBlob(item.blob);
+        }
         offlineTrackIdsCache.add(videoId);
         return item;
       }
@@ -931,6 +979,13 @@ export const db = {
     try {
       await dbManager.executeWithRetry((idb) => idb.put('offline_tracks', item));
       offlineTrackIdsCache.add(track.videoId);
+
+      // Broadcast offline sync event across the application
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('musicfy:offline-updated', { detail: { videoId: track.videoId, action: 'save' } }));
+        window.dispatchEvent(new Event('musicfy:offline-tracks-changed'));
+      }
+
       return item;
     } catch (err) {
       console.warn(`[IDB] Failed to save offline track ${track.videoId}:`, err);
@@ -1058,6 +1113,13 @@ export const db = {
     try {
       await dbManager.executeWithRetry((idb) => idb.delete('offline_tracks', videoId));
       offlineTrackIdsCache.delete(videoId);
+
+      // Broadcast offline sync event
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('musicfy:offline-updated', { detail: { videoId, action: 'remove' } }));
+        window.dispatchEvent(new Event('musicfy:offline-tracks-changed'));
+      }
+
       return true;
     } catch (err) {
       console.warn(`[IDB] Failed to remove offline track ${videoId}:`, err);
@@ -1070,7 +1132,9 @@ export const db = {
     if (offlineTrackIdsCache.has(videoId)) return true;
     try {
       const item = await dbManager.executeWithRetry((idb) => idb.get('offline_tracks', videoId));
-      const hasValidBlob = Boolean(item && item.blob && item.blob instanceof Blob && item.blob.size > 0);
+      const hasValidBlob = Boolean(
+        item && item.track && (isBlobLike(item.blob) || (typeof item.sizeBytes === 'number' && item.sizeBytes > 0))
+      );
       if (hasValidBlob) {
         offlineTrackIdsCache.add(videoId);
       }
@@ -1085,6 +1149,13 @@ export const db = {
     try {
       await dbManager.executeWithRetry((idb) => idb.clear('offline_tracks'));
       offlineTrackIdsCache.clear();
+
+      // Broadcast offline sync event
+      if (typeof window !== 'undefined') {
+        window.dispatchEvent(new CustomEvent('musicfy:offline-updated', { detail: { action: 'clear' } }));
+        window.dispatchEvent(new Event('musicfy:offline-tracks-changed'));
+      }
+
       return true;
     } catch (err) {
       console.warn('[IDB] Failed to clear offline tracks:', err);

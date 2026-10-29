@@ -11,10 +11,19 @@ import android.content.Intent;
 import android.content.IntentFilter;
 import android.graphics.Bitmap;
 import android.graphics.BitmapFactory;
+import android.graphics.Color;
+import android.media.AudioAttributes;
+import android.media.AudioFocusRequest;
+import android.media.AudioManager;
 import android.media.MediaMetadata;
 import android.media.session.MediaSession;
 import android.media.session.PlaybackState;
+import android.net.Uri;
+import android.net.wifi.WifiManager;
 import android.os.Build;
+import android.os.PowerManager;
+import android.provider.Settings;
+import android.util.Base64;
 import android.webkit.JavascriptInterface;
 import android.webkit.WebView;
 import java.io.InputStream;
@@ -22,8 +31,8 @@ import java.net.HttpURLConnection;
 import java.net.URL;
 
 /**
- * Enterprise Native Android MediaSession & Status Bar / Lockscreen Notification Controller
- * Bridges HTML5 Audio playback to native Android MediaSessionCompat and MediaStyle notifications.
+ * Enterprise Native Android MediaSession, Audio Focus & Status Bar / Lockscreen Notification Controller
+ * Bridges HTML5 Audio playback to native Android MediaSession, Audio Focus, Wakelock, and MediaStyle notifications.
  */
 public class MediaSessionBridge {
     private static final String CHANNEL_ID = "musicfy_playback_channel";
@@ -34,17 +43,31 @@ public class MediaSessionBridge {
     private static final String ACTION_PAUSE = "com.musicfy.app.ACTION_PAUSE";
     private static final String ACTION_NEXT = "com.musicfy.app.ACTION_NEXT";
 
+    private static volatile Notification lastNotification = null;
+
+    public static Notification getLastNotification() {
+        return lastNotification;
+    }
+
     private final Activity activity;
     private final WebView webView;
     private final NotificationManager notificationManager;
     private MediaSession mediaSession;
     private BroadcastReceiver receiver;
 
+    // Hardware locks & Audio Focus managers
+    private PowerManager.WakeLock wakeLock = null;
+    private WifiManager.WifiLock wifiLock = null;
+    private AudioManager audioManager = null;
+    private AudioFocusRequest audioFocusRequest = null;
+    private boolean hasAudioFocus = false;
+
     private String currentTitle = "MusicFY";
     private String currentArtist = "Musik";
     private String currentAlbum = "";
     private String currentArtworkUrl = "";
     private Bitmap currentArtwork = null;
+    private int currentColor = 0xFF1DB954; // Spotify green default
     private boolean isPlaying = false;
     private long currentPositionMs = 0;
     private long currentDurationMs = 0;
@@ -53,6 +76,147 @@ public class MediaSessionBridge {
         this.activity = activity;
         this.webView = webView;
         this.notificationManager = (NotificationManager) activity.getSystemService(Context.NOTIFICATION_SERVICE);
+        this.audioManager = (AudioManager) activity.getSystemService(Context.AUDIO_SERVICE);
+    }
+
+    private synchronized void acquireLocks() {
+        try {
+            // 1. CPU Partial WakeLock (prevents Android kernel CPU sleep)
+            if (wakeLock == null) {
+                PowerManager pm = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
+                if (pm != null) {
+                    wakeLock = pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "MusicFY::PlaybackWakeLock");
+                    wakeLock.setReferenceCounted(false);
+                }
+            }
+            if (wakeLock != null && !wakeLock.isHeld()) {
+                wakeLock.acquire(12 * 60 * 60 * 1000L); // 12 hours max safety timeout
+            }
+
+            // 2. High-Performance WifiLock (prevents Wi-Fi chip throttling during heavy gaming)
+            if (wifiLock == null) {
+                WifiManager wm = (WifiManager) activity.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                if (wm != null) {
+                    int mode = (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q)
+                        ? WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+                        : WifiManager.WIFI_MODE_FULL_HIGH_PERF;
+                    wifiLock = wm.createWifiLock(mode, "MusicFY::PlaybackWifiLock");
+                    wifiLock.setReferenceCounted(false);
+                }
+            }
+            if (wifiLock != null && !wifiLock.isHeld()) {
+                wifiLock.acquire();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private synchronized void releaseLocks() {
+        try {
+            if (wakeLock != null && wakeLock.isHeld()) {
+                wakeLock.release();
+            }
+            if (wifiLock != null && wifiLock.isHeld()) {
+                wifiLock.release();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    private final AudioManager.OnAudioFocusChangeListener focusChangeListener = new AudioManager.OnAudioFocusChangeListener() {
+        @Override
+        public void onAudioFocusChange(int focusChange) {
+            switch (focusChange) {
+                case AudioManager.AUDIOFOCUS_LOSS:
+                case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
+                    // Another app or incoming phone call took audio focus
+                    dispatchAction("pause");
+                    break;
+                case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
+                    // Game sound effects or navigation alert: Keep playing without crashing
+                    break;
+                case AudioManager.AUDIOFOCUS_GAIN:
+                    // Regained audio focus after interruption
+                    dispatchAction("play");
+                    break;
+            }
+        }
+    };
+
+    @JavascriptInterface
+    public synchronized boolean requestAudioFocus() {
+        if (hasAudioFocus) return true;
+        try {
+            if (audioManager == null) {
+                audioManager = (AudioManager) activity.getSystemService(Context.AUDIO_SERVICE);
+            }
+            if (audioManager == null) return false;
+
+            int result;
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                AudioAttributes playbackAttributes = new AudioAttributes.Builder()
+                    .setUsage(AudioAttributes.USAGE_MEDIA)
+                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
+                    .build();
+
+                audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
+                    .setAudioAttributes(playbackAttributes)
+                    .setAcceptsDelayedFocusGain(true)
+                    .setOnAudioFocusChangeListener(focusChangeListener)
+                    .build();
+
+                result = audioManager.requestAudioFocus(audioFocusRequest);
+            } else {
+                result = audioManager.requestAudioFocus(
+                    focusChangeListener,
+                    AudioManager.STREAM_MUSIC,
+                    AudioManager.AUDIOFOCUS_GAIN
+                );
+            }
+
+            hasAudioFocus = (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
+            return hasAudioFocus;
+        } catch (Exception ignored) {
+            return false;
+        }
+    }
+
+    @JavascriptInterface
+    public synchronized void abandonAudioFocus() {
+        if (!hasAudioFocus) return;
+        try {
+            if (audioManager != null) {
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O && audioFocusRequest != null) {
+                    audioManager.abandonAudioFocusRequest(audioFocusRequest);
+                } else if (focusChangeListener != null) {
+                    audioManager.abandonAudioFocus(focusChangeListener);
+                }
+            }
+            hasAudioFocus = false;
+        } catch (Exception ignored) {}
+    }
+
+    @JavascriptInterface
+    public void requestIgnoreBatteryOptimizations() {
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.M) {
+            try {
+                PowerManager pm = (PowerManager) activity.getSystemService(Context.POWER_SERVICE);
+                if (pm != null && !pm.isIgnoringBatteryOptimizations(activity.getPackageName())) {
+                    Intent intent = new Intent(Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS);
+                    intent.setData(Uri.parse("package:" + activity.getPackageName()));
+                    activity.startActivity(intent);
+                }
+            } catch (Exception ignored) {}
+        }
+    }
+
+    private int parseColor(String hex) {
+        if (hex == null || hex.trim().isEmpty()) return 0xFF1DB954;
+        try {
+            String clean = hex.trim();
+            if (!clean.startsWith("#")) clean = "#" + clean;
+            return Color.parseColor(clean);
+        } catch (Exception e) {
+            return 0xFF1DB954;
+        }
     }
 
     private synchronized void initSession() {
@@ -193,11 +357,15 @@ public class MediaSessionBridge {
                 .putString(MediaMetadata.METADATA_KEY_TITLE, currentTitle)
                 .putString(MediaMetadata.METADATA_KEY_ARTIST, currentArtist)
                 .putString(MediaMetadata.METADATA_KEY_ALBUM, currentAlbum)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_TITLE, currentTitle)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_SUBTITLE, currentArtist)
+                .putString(MediaMetadata.METADATA_KEY_DISPLAY_DESCRIPTION, currentAlbum)
                 .putLong(MediaMetadata.METADATA_KEY_DURATION, currentDurationMs);
 
             if (currentArtwork != null) {
                 metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART, currentArtwork);
                 metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_ART, currentArtwork);
+                metaBuilder.putBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON, currentArtwork);
             }
 
             mediaSession.setMetadata(metaBuilder.build());
@@ -239,7 +407,10 @@ public class MediaSessionBridge {
                    .setContentIntent(pTap)
                    .setVisibility(Notification.VISIBILITY_PUBLIC)
                    .setOngoing(isPlaying)
-                   .setOnlyAlertOnce(true);
+                   .setAutoCancel(!isPlaying)
+                   .setOnlyAlertOnce(true)
+                   .setColorized(true)
+                   .setColor(currentColor);
 
             if (currentArtwork != null) {
                 builder.setLargeIcon(currentArtwork);
@@ -266,43 +437,145 @@ public class MediaSessionBridge {
                 pNext
             ).build());
 
+            Notification notification = builder.build();
+            // Flag as persistent and non-clearable while audio is actively playing
+            if (isPlaying) {
+                notification.flags |= Notification.FLAG_ONGOING_EVENT | Notification.FLAG_NO_CLEAR;
+            }
+            lastNotification = notification;
+
+            // Coordinate with Foreground Service, Audio Focus & WakeLock to prevent Android process suspension
+            if (isPlaying) {
+                requestAudioFocus();
+                acquireLocks();
+
+                AudioForegroundService fService = AudioForegroundService.getInstance();
+                if (fService != null) {
+                    fService.updateNotification(notification, true);
+                } else {
+                    Intent sIntent = new Intent(activity, AudioForegroundService.class);
+                    sIntent.setAction(AudioForegroundService.ACTION_START);
+                    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                        activity.startForegroundService(sIntent);
+                    } else {
+                        activity.startService(sIntent);
+                    }
+                }
+            } else {
+                releaseLocks();
+                AudioForegroundService fService = AudioForegroundService.getInstance();
+                if (fService != null) {
+                    fService.updateNotification(notification, false);
+                }
+            }
+
             if (notificationManager != null) {
-                notificationManager.notify(NOTIFICATION_ID, builder.build());
+                notificationManager.notify(NOTIFICATION_ID, notification);
             }
         } catch (Exception e) {
             e.printStackTrace();
         }
     }
 
+    private void setFallbackArtwork() {
+        try {
+            if (currentArtwork == null) {
+                Bitmap appIcon = BitmapFactory.decodeResource(activity.getResources(), R.mipmap.ic_launcher);
+                if (appIcon != null) {
+                    currentArtwork = appIcon;
+                    activity.runOnUiThread(this::showNotification);
+                }
+            }
+        } catch (Exception ignored) {}
+    }
+
     private void loadArtwork(String urlStr) {
+        if (urlStr == null || urlStr.trim().isEmpty()) {
+            setFallbackArtwork();
+            return;
+        }
+
+        // 1. Data URI / Base64 Handler
+        if (urlStr.startsWith("data:image")) {
+            try {
+                int comma = urlStr.indexOf(",");
+                if (comma != -1) {
+                    byte[] data = Base64.decode(urlStr.substring(comma + 1), Base64.DEFAULT);
+                    Bitmap bmp = BitmapFactory.decodeByteArray(data, 0, data.length);
+                    if (bmp != null) {
+                        currentArtwork = bmp;
+                        activity.runOnUiThread(this::showNotification);
+                        return;
+                    }
+                }
+            } catch (Exception ignored) {}
+        }
+
+        // 2. HTTP/HTTPS Loader with redirects and User-Agent
         new Thread(() -> {
+            HttpURLConnection conn = null;
+            InputStream in = null;
             try {
                 URL url = new URL(urlStr);
-                HttpURLConnection conn = (HttpURLConnection) url.openConnection();
-                conn.setDoInput(true);
-                conn.setConnectTimeout(5000);
-                conn.setReadTimeout(5000);
+                conn = (HttpURLConnection) url.openConnection();
+                conn.setInstanceFollowRedirects(true);
+                conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; Mobile)");
+                conn.setConnectTimeout(8000);
+                conn.setReadTimeout(8000);
                 conn.connect();
-                InputStream in = conn.getInputStream();
+
+                int code = conn.getResponseCode();
+                if (code == HttpURLConnection.HTTP_MOVED_PERM || code == HttpURLConnection.HTTP_MOVED_TEMP) {
+                    String redirectUrl = conn.getHeaderField("Location");
+                    if (redirectUrl != null) {
+                        conn.disconnect();
+                        url = new URL(redirectUrl);
+                        conn = (HttpURLConnection) url.openConnection();
+                        conn.setRequestProperty("User-Agent", "Mozilla/5.0 (Linux; Android 10; Mobile)");
+                        conn.setConnectTimeout(8000);
+                        conn.setReadTimeout(8000);
+                        conn.connect();
+                    }
+                }
+
+                in = conn.getInputStream();
                 Bitmap bmp = BitmapFactory.decodeStream(in);
                 if (bmp != null) {
                     currentArtwork = bmp;
                     activity.runOnUiThread(this::showNotification);
+                    return;
                 }
-            } catch (Exception ignored) {}
+            } catch (Exception ignored) {
+            } finally {
+                if (in != null) try { in.close(); } catch (Exception ignored) {}
+                if (conn != null) try { conn.disconnect(); } catch (Exception ignored) {}
+            }
+
+            // Fallback: If network failed or offline, load app icon so notification is never blank
+            setFallbackArtwork();
         }).start();
     }
 
     @JavascriptInterface
     public void updateMetadata(String title, String artist, String album, String artworkUrl, long durationMs) {
+        updateMetadataWithColor(title, artist, album, artworkUrl, durationMs, null);
+    }
+
+    @JavascriptInterface
+    public void updateMetadataWithColor(String title, String artist, String album, String artworkUrl, long durationMs, String colorHex) {
         this.currentTitle = (title != null && !title.isEmpty()) ? title : "MusicFY";
         this.currentArtist = (artist != null && !artist.isEmpty()) ? artist : "Musik";
         this.currentAlbum = (album != null) ? album : "";
         this.currentDurationMs = durationMs;
+        if (colorHex != null && !colorHex.isEmpty()) {
+            this.currentColor = parseColor(colorHex);
+        }
 
         if (artworkUrl != null && !artworkUrl.isEmpty() && !artworkUrl.equals(currentArtworkUrl)) {
             this.currentArtworkUrl = artworkUrl;
             loadArtwork(artworkUrl);
+        } else if (currentArtwork == null) {
+            setFallbackArtwork();
         }
 
         activity.runOnUiThread(this::showNotification);
@@ -323,18 +596,27 @@ public class MediaSessionBridge {
     public void destroySession() {
         activity.runOnUiThread(() -> {
             try {
+                abandonAudioFocus();
+                releaseLocks();
                 if (mediaSession != null) {
                     mediaSession.setActive(false);
                 }
+                Intent sIntent = new Intent(activity, AudioForegroundService.class);
+                sIntent.setAction(AudioForegroundService.ACTION_STOP);
+                activity.startService(sIntent);
+
                 if (notificationManager != null) {
                     notificationManager.cancel(NOTIFICATION_ID);
                 }
+                lastNotification = null;
             } catch (Exception ignored) {}
         });
     }
 
     public void destroy() {
         try {
+            abandonAudioFocus();
+            releaseLocks();
             if (receiver != null) {
                 activity.unregisterReceiver(receiver);
                 receiver = null;
@@ -344,9 +626,14 @@ public class MediaSessionBridge {
                 mediaSession.release();
                 mediaSession = null;
             }
+            Intent sIntent = new Intent(activity, AudioForegroundService.class);
+            sIntent.setAction(AudioForegroundService.ACTION_STOP);
+            activity.startService(sIntent);
+
             if (notificationManager != null) {
                 notificationManager.cancel(NOTIFICATION_ID);
             }
+            lastNotification = null;
         } catch (Exception ignored) {}
     }
 }

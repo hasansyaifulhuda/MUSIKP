@@ -13,6 +13,36 @@ import { MarqueeText } from '@/components/MarqueeText';
 import { Equalizer } from '@/components/Equalizer';
 import { VirtualTrackList } from '@/components/VirtualTrackList';
 
+function OfflineTrackThumbnail({ src, alt, priority }: { src: string; alt: string; priority?: boolean }) {
+  const [imgError, setImgError] = useState(false);
+
+  return (
+    <div className="relative w-12 h-12 md:w-14 md:h-14 rounded-lg overflow-hidden shrink-0 shadow bg-neutral-900 flex items-center justify-center">
+      {!imgError && src ? (
+        <Image
+          src={src}
+          alt={alt}
+          fill
+          sizes="56px"
+          priority={priority}
+          loading={priority ? undefined : 'lazy'}
+          decoding="async"
+          className="object-cover"
+          onError={() => setImgError(true)}
+          unoptimized={src.startsWith('data:') || src.startsWith('blob:')}
+        />
+      ) : (
+        <div className="w-full h-full bg-gradient-to-br from-neutral-800 to-neutral-950 flex items-center justify-center">
+          <Music className="w-5 h-5 text-white/40" />
+        </div>
+      )}
+      <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-[#1DB954] flex items-center justify-center shadow z-10">
+        <CheckCircle2 className="w-3 h-3 text-black stroke-[3]" />
+      </div>
+    </div>
+  );
+}
+
 export default function DownloadPage() {
   const router = useRouter();
   const [offlineTracks, setOfflineTracks] = useState<OfflineTrack[]>([]);
@@ -20,15 +50,15 @@ export default function DownloadPage() {
 
   const { playTrack, currentTrack, isPlaying } = useMusic();
 
-  const loadOfflineTracks = useCallback(async () => {
+  const loadOfflineTracks = useCallback(async (silent = false) => {
     try {
-      setLoading(true);
+      if (!silent) setLoading(true);
       const data = await db.getOfflineTracks();
       setOfflineTracks([...data].reverse());
     } catch (err) {
       console.error('Failed to load offline tracks:', err);
     } finally {
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }, []);
 
@@ -36,18 +66,45 @@ export default function DownloadPage() {
     let mounted = true;
     loadOfflineTracks();
 
-    const handleFocusSync = () => {
-      db.getOfflineTracks()
-        .then((data) => {
-          if (mounted) setOfflineTracks([...data].reverse());
-        })
-        .catch(() => {});
+    let debounceTimer: any = null;
+    const triggerSync = () => {
+      clearTimeout(debounceTimer);
+      debounceTimer = setTimeout(() => {
+        if (!mounted) return;
+        db.getOfflineTracks()
+          .then((data) => {
+            if (mounted) setOfflineTracks([...data].reverse());
+          })
+          .catch(() => {});
+      }, 100);
     };
 
-    window.addEventListener('focus', handleFocusSync);
+    const handleVisibility = () => {
+      if (document.visibilityState === 'visible') {
+        triggerSync();
+      }
+    };
+
+    window.addEventListener('focus', triggerSync);
+    window.addEventListener('pageshow', triggerSync);
+    window.addEventListener('resume', triggerSync);
+    window.addEventListener('online', triggerSync);
+    window.addEventListener('offline', triggerSync);
+    window.addEventListener('musicfy:offline-updated', triggerSync);
+    window.addEventListener('musicfy:offline-tracks-changed', triggerSync);
+    document.addEventListener('visibilitychange', handleVisibility);
+
     return () => {
       mounted = false;
-      window.removeEventListener('focus', handleFocusSync);
+      clearTimeout(debounceTimer);
+      window.removeEventListener('focus', triggerSync);
+      window.removeEventListener('pageshow', triggerSync);
+      window.removeEventListener('resume', triggerSync);
+      window.removeEventListener('online', triggerSync);
+      window.removeEventListener('offline', triggerSync);
+      window.removeEventListener('musicfy:offline-updated', triggerSync);
+      window.removeEventListener('musicfy:offline-tracks-changed', triggerSync);
+      document.removeEventListener('visibilitychange', handleVisibility);
     };
   }, [loadOfflineTracks]);
 
@@ -198,21 +255,7 @@ export default function DownloadPage() {
                     )}
                   </div>
 
-                  <div className="relative w-12 h-12 md:w-14 md:h-14 rounded-lg overflow-hidden shrink-0 shadow bg-black/40">
-                    <Image
-                      src={thumb}
-                      alt={track.name}
-                      fill
-                      sizes="56px"
-                      priority={index < 4}
-                      loading={index < 4 ? undefined : 'lazy'}
-                      decoding="async"
-                      className="object-cover"
-                    />
-                    <div className="absolute top-1 right-1 w-4 h-4 rounded-full bg-[#1DB954] flex items-center justify-center shadow">
-                      <CheckCircle2 className="w-3 h-3 text-black stroke-[3]" />
-                    </div>
-                  </div>
+                  <OfflineTrackThumbnail src={thumb} alt={track.name} priority={index < 4} />
 
                   <div className="flex-1 min-w-0 pr-2">
                     <MarqueeText

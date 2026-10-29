@@ -24,13 +24,18 @@ import { useCrossfadeStore } from '@/lib/crossfadeStore';
 import { useAudioQualityStore } from '@/lib/audioQualityStore';
 import { deduplicatedFetch } from '@/lib/clientDeduplication';
 import { useDevModalStore } from '@/lib/devModalStore';
+import { startBackgroundAudio, stopBackgroundAudio } from '@/lib/backgroundService';
 
 declare global {
   interface Window {
     AndroidMediaBridge?: {
       updateMetadata: (title: string, artist: string, album: string, artworkUrl: string, durationMs: number) => void;
+      updateMetadataWithColor?: (title: string, artist: string, album: string, artworkUrl: string, durationMs: number, colorHex: string) => void;
       updatePlaybackState: (state: string, positionMs: number, durationMs: number) => void;
       destroySession: () => void;
+      requestAudioFocus?: () => boolean;
+      abandonAudioFocus?: () => void;
+      requestIgnoreBatteryOptimizations?: () => void;
     };
     __handleAndroidMediaAction?: (action: string, arg?: any) => void;
   }
@@ -1410,12 +1415,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             artist: artist || 'MusicFY Artist',
             album: albumTitle,
             artwork: [
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 96), sizes: '96x96' },
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 128), sizes: '128x128' },
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 192), sizes: '192x192' },
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 256), sizes: '256x256' },
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 384), sizes: '384x384' },
-              { src: absoluteArtwork, sizes: '512x512' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 96), sizes: '96x96', type: 'image/jpeg' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 128), sizes: '128x128', type: 'image/jpeg' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 192), sizes: '192x192', type: 'image/jpeg' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 256), sizes: '256x256', type: 'image/jpeg' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 384), sizes: '384x384', type: 'image/jpeg' },
+              { src: absoluteArtwork, sizes: '512x512', type: 'image/jpeg' },
             ],
           });
         } catch (err) {
@@ -1431,7 +1436,19 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     // 2. Native Android MediaSession Bridge (for Capacitor APK Status Bar & Lockscreen Controls)
     if (typeof window !== 'undefined' && window.AndroidMediaBridge) {
       try {
-        window.AndroidMediaBridge.updateMetadata(trackTitle, artist, albumTitle, absoluteArtwork, durMs);
+        const colorHex = dominantColor || '#1DB954';
+        if (typeof (window.AndroidMediaBridge as any).updateMetadataWithColor === 'function') {
+          (window.AndroidMediaBridge as any).updateMetadataWithColor(
+            trackTitle,
+            artist,
+            albumTitle,
+            absoluteArtwork,
+            durMs,
+            colorHex
+          );
+        } else {
+          window.AndroidMediaBridge.updateMetadata(trackTitle, artist, albumTitle, absoluteArtwork, durMs);
+        }
         window.AndroidMediaBridge.updatePlaybackState(
           isPlaying ? 'playing' : 'paused',
           posMs,
@@ -1449,7 +1466,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         updateMediaSessionPosition(audio.currentTime || 0, currentTrack.duration);
       }
     }
-  }, [currentTrack, isPlaying, updateMediaSessionPosition]);
+  }, [currentTrack, isPlaying, dominantColor, updateMediaSessionPosition]);
 
   // Sync MediaSession playbackState with Store isPlaying (Web & Android APK)
   useEffect(() => {
@@ -1517,12 +1534,18 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
-    if (isPlaying) requestLock();
+    if (isPlaying) {
+      requestLock();
+      startBackgroundAudio();
+    } else {
+      stopBackgroundAudio();
+    }
 
     const handleVisibilityChange = () => {
       if (document.visibilityState === 'visible') {
         if (usePlayerStore.getState().isPlaying) {
           requestLock();
+          startBackgroundAudio();
           if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
             navigator.mediaSession.playbackState = 'playing';
           }
@@ -1530,9 +1553,20 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       } else {
         // Tab hidden, screen locked, or minimized:
         // NEVER PAUSE AUDIO!
-        // Reinforce MediaSession playing state to keep background audio alive!
-        if (usePlayerStore.getState().isPlaying && typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-          navigator.mediaSession.playbackState = 'playing';
+        // Reinforce Foreground Service, Audio Focus, and MediaSession state!
+        if (usePlayerStore.getState().isPlaying) {
+          startBackgroundAudio();
+          if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+            navigator.mediaSession.playbackState = 'playing';
+          }
+          if (typeof window !== 'undefined' && window.AndroidMediaBridge) {
+            try {
+              const audio = getPersistentAudioElement();
+              const posMs = Math.round((audio?.currentTime || usePlayerStore.getState().progress || 0) * 1000);
+              const durMs = Math.round((audio?.duration || usePlayerStore.getState().duration || 0) * 1000);
+              window.AndroidMediaBridge.updatePlaybackState('playing', posMs, durMs);
+            } catch {}
+          }
         }
       }
     };
@@ -1545,6 +1579,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         wakeLockRef.current.release().catch(() => {});
         wakeLockRef.current = null;
       }
+      stopBackgroundAudio();
     };
   }, [isPlaying]);
 

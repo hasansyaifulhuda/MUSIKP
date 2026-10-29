@@ -16,6 +16,7 @@ public class MainActivity extends BridgeActivity {
 
     @Override
     public void onCreate(Bundle savedInstanceState) {
+        registerPlugin(MusicBackgroundPlugin.class);
         super.onCreate(savedInstanceState);
 
         // Request runtime permission for Android 13+ (Tiramisu / API 33+) to allow media notifications
@@ -40,12 +41,53 @@ public class MainActivity extends BridgeActivity {
                 WebSettings settings = webView.getSettings();
                 // Ensure ongoing and background audio does not require user gestures for autoplaying next tracks
                 settings.setMediaPlaybackRequiresUserGesture(false);
+                settings.setJavaScriptCanOpenWindowsAutomatically(true);
+
+                // Elevate WebView renderer priority so Android LMK does not kill it when user runs heavy games
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
+                }
 
                 // Initialize native Android MediaSession & Status bar / Lockscreen Notification bridge
                 if (mediaBridge == null) {
                     mediaBridge = new MediaSessionBridge(this, webView);
                     webView.addJavascriptInterface(mediaBridge, "AndroidMediaBridge");
                 }
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onPause() {
+        super.onPause();
+        // Prevent Capacitor from freezing JS timers and HTML5 audio threads when minimized to home screen
+        try {
+            if (bridge != null && bridge.getWebView() != null) {
+                WebView webView = bridge.getWebView();
+                webView.resumeTimers();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onStop() {
+        super.onStop();
+        // Reinforce timer continuity so queue transitions and ended events fire when screen is locked
+        try {
+            if (bridge != null && bridge.getWebView() != null) {
+                WebView webView = bridge.getWebView();
+                webView.resumeTimers();
+            }
+        } catch (Exception ignored) {}
+    }
+
+    @Override
+    public void onResume() {
+        super.onResume();
+        try {
+            if (bridge != null && bridge.getWebView() != null) {
+                WebView webView = bridge.getWebView();
+                webView.resumeTimers();
             }
         } catch (Exception ignored) {}
     }
