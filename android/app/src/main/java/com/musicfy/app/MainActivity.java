@@ -98,6 +98,17 @@ public class MainActivity extends BridgeActivity {
             mediaBridge.destroy();
             mediaBridge = null;
         }
+        try {
+            Intent sIntent = new Intent(this, AudioForegroundService.class);
+            sIntent.setAction(AudioForegroundService.ACTION_STOP);
+            startService(sIntent);
+            stopService(sIntent);
+
+            android.app.NotificationManager nm = (android.app.NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                nm.cancel(AudioForegroundService.NOTIFICATION_ID);
+            }
+        } catch (Exception ignored) {}
         super.onDestroy();
     }
 }

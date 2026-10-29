@@ -32,7 +32,7 @@
             android:name=".AudioForegroundService"
             android:enabled="true"
             android:exported="false"
-            android:stopWithTask="false"
+            android:stopWithTask="true"
             android:foregroundServiceType="mediaPlayback" />
     </application>
 

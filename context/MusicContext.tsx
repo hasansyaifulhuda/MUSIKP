@@ -24,7 +24,7 @@ import { useCrossfadeStore } from '@/lib/crossfadeStore';
 import { useAudioQualityStore } from '@/lib/audioQualityStore';
 import { deduplicatedFetch } from '@/lib/clientDeduplication';
 import { useDevModalStore } from '@/lib/devModalStore';
-import { startBackgroundAudio, stopBackgroundAudio } from '@/lib/backgroundService';
+import { startBackgroundAudio, stopBackgroundAudio, terminateBackgroundAudio } from '@/lib/backgroundService';
 
 declare global {
   interface Window {
@@ -273,6 +273,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Update MediaSession Position State (Throttled for high performance & lockscreen scrubber)
   const updateMediaSessionPosition = useCallback((curTime: number, totalDur?: number) => {
     const dur = totalDur || usePlayerStore.getState().duration || 0;
+    const audio = getPersistentAudioElement();
+    const rate = audio && typeof audio.playbackRate === 'number' && isFinite(audio.playbackRate) ? audio.playbackRate : 1;
+
     if (
       typeof navigator !== 'undefined' &&
       'mediaSession' in navigator &&
@@ -289,8 +292,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       ) {
         try {
           navigator.mediaSession.setPositionState({
-            duration: dur,
-            playbackRate: 1,
+            duration: Math.max(1, dur),
+            playbackRate: rate,
             position: Math.min(dur, Math.max(0, curTime)),
           });
         } catch {}
@@ -450,7 +453,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           setProgress(cur);
         }
         const now = Date.now();
-        if (now - lastMediaSessionUpdateRef.current >= 1200) {
+        if (now - lastMediaSessionUpdateRef.current >= 600) {
           lastMediaSessionUpdateRef.current = now;
           updateMediaSessionPosition(cur, audio.duration);
 
@@ -715,6 +718,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
+    const handleSeeked = () => {
+      if (audio.duration && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
+        updateMediaSessionPosition(audio.currentTime, audio.duration);
+      }
+    };
+
     audio.addEventListener('loadedmetadata', handleLoadedMetadata);
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('durationchange', handleDurationChange);
@@ -722,6 +731,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     audio.addEventListener('pause', handlePause);
     audio.addEventListener('waiting', handleWaiting);
     audio.addEventListener('playing', handlePlaying);
+    audio.addEventListener('seeked', handleSeeked);
     audio.addEventListener('ended', handleEnded);
     audio.addEventListener('error', handleError);
 
@@ -733,6 +743,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       audio.removeEventListener('pause', handlePause);
       audio.removeEventListener('waiting', handleWaiting);
       audio.removeEventListener('playing', handlePlaying);
+      audio.removeEventListener('seeked', handleSeeked);
       audio.removeEventListener('ended', handleEnded);
       audio.removeEventListener('error', handleError);
     };
@@ -1326,6 +1337,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           isFinite(details.seekTime)
         ) {
           mediaActionsRef.current.seekTo(details.seekTime);
+          const audio = getPersistentAudioElement();
+          const dur = audio?.duration || usePlayerStore.getState().duration || 0;
+          updateMediaSessionPosition(details.seekTime, dur);
         }
       } catch (err) {
         console.error('[MediaSession] SeekTo handler error:', err);
@@ -1337,7 +1351,11 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       try {
         const skip = details.seekOffset || 10;
         const cur = usePlayerStore.getState().progress;
-        mediaActionsRef.current.seekTo(Math.max(0, cur - skip));
+        const target = Math.max(0, cur - skip);
+        mediaActionsRef.current.seekTo(target);
+        const audio = getPersistentAudioElement();
+        const dur = audio?.duration || usePlayerStore.getState().duration || 0;
+        updateMediaSessionPosition(target, dur);
       } catch (err) {
         console.error('[MediaSession] SeekBackward handler error:', err);
       }
@@ -1349,7 +1367,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         const skip = details.seekOffset || 10;
         const cur = usePlayerStore.getState().progress;
         const dur = usePlayerStore.getState().duration;
-        mediaActionsRef.current.seekTo(Math.min(dur, cur + skip));
+        const target = Math.min(dur, cur + skip);
+        mediaActionsRef.current.seekTo(target);
+        updateMediaSessionPosition(target, dur);
       } catch (err) {
         console.error('[MediaSession] SeekForward handler error:', err);
       }
@@ -1365,7 +1385,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         mediaActionsRef.current.pause();
         if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'none';
+          navigator.mediaSession.metadata = null;
         }
+        terminateBackgroundAudio();
       } catch (err) {
         console.error('[MediaSession] Stop handler error:', err);
       }
@@ -1375,6 +1397,54 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       VALID_MEDIA_SESSION_ACTIONS.forEach((action) => {
         safeSetActionHandler(action, null);
       });
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.playbackState = 'none';
+          navigator.mediaSession.metadata = null;
+        } catch {}
+      }
+      terminateBackgroundAudio();
+    };
+  }, []);
+
+  // Capacitor App Lifecycle & App State Change Listener (Requirement 1 & 2)
+  useEffect(() => {
+    let appStateSub: any = null;
+
+    const setupAppListener = async () => {
+      try {
+        const { App } = await import('@capacitor/app');
+        appStateSub = await App.addListener('appStateChange', (state) => {
+          // When app is minimized or backgrounded:
+          // If audio is not playing, immediately dismiss any lingering notifications and reset media session!
+          if (!state.isActive && !usePlayerStore.getState().isPlaying) {
+            terminateBackgroundAudio();
+          }
+        });
+      } catch {}
+    };
+
+    setupAppListener();
+
+    const handleWindowUnload = () => {
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.playbackState = 'none';
+          navigator.mediaSession.metadata = null;
+        } catch {}
+      }
+      terminateBackgroundAudio();
+    };
+
+    window.addEventListener('beforeunload', handleWindowUnload);
+    window.addEventListener('pagehide', handleWindowUnload);
+
+    return () => {
+      if (appStateSub && typeof appStateSub.remove === 'function') {
+        appStateSub.remove();
+      }
+      window.removeEventListener('beforeunload', handleWindowUnload);
+      window.removeEventListener('pagehide', handleWindowUnload);
     };
   }, []);
 
@@ -1387,11 +1457,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           navigator.mediaSession.playbackState = 'none';
         } catch {}
       }
-      if (typeof window !== 'undefined' && window.AndroidMediaBridge) {
-        try {
-          window.AndroidMediaBridge.destroySession();
-        } catch {}
-      }
+      terminateBackgroundAudio();
       return;
     }
 

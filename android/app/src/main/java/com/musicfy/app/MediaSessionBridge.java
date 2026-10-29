@@ -599,11 +599,17 @@ public class MediaSessionBridge {
                 abandonAudioFocus();
                 releaseLocks();
                 if (mediaSession != null) {
+                    try {
+                        mediaSession.setPlaybackState(new PlaybackState.Builder()
+                            .setState(PlaybackState.STATE_NONE, 0, 0f)
+                            .build());
+                    } catch (Exception ignored) {}
                     mediaSession.setActive(false);
                 }
                 Intent sIntent = new Intent(activity, AudioForegroundService.class);
                 sIntent.setAction(AudioForegroundService.ACTION_STOP);
                 activity.startService(sIntent);
+                activity.stopService(sIntent);
 
                 if (notificationManager != null) {
                     notificationManager.cancel(NOTIFICATION_ID);
@@ -622,6 +628,11 @@ public class MediaSessionBridge {
                 receiver = null;
             }
             if (mediaSession != null) {
+                try {
+                    mediaSession.setPlaybackState(new PlaybackState.Builder()
+                        .setState(PlaybackState.STATE_NONE, 0, 0f)
+                        .build());
+                } catch (Exception ignored) {}
                 mediaSession.setActive(false);
                 mediaSession.release();
                 mediaSession = null;
@@ -629,6 +640,7 @@ public class MediaSessionBridge {
             Intent sIntent = new Intent(activity, AudioForegroundService.class);
             sIntent.setAction(AudioForegroundService.ACTION_STOP);
             activity.startService(sIntent);
+            activity.stopService(sIntent);
 
             if (notificationManager != null) {
                 notificationManager.cancel(NOTIFICATION_ID);

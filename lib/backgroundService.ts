@@ -53,6 +53,32 @@ export async function stopBackgroundAudio(): Promise<void> {
 }
 
 /**
+ * Fully tears down native foreground service, Android media session, and dismisses notifications immediately.
+ */
+export async function terminateBackgroundAudio(): Promise<void> {
+  if (typeof window === 'undefined') return;
+
+  try {
+    if ((window as any).AndroidMediaBridge && typeof (window as any).AndroidMediaBridge.destroySession === 'function') {
+      (window as any).AndroidMediaBridge.destroySession();
+    }
+  } catch {}
+
+  try {
+    if (MusicBackgroundService && typeof MusicBackgroundService.stopForegroundService === 'function') {
+      await MusicBackgroundService.stopForegroundService();
+    }
+  } catch {}
+
+  try {
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      navigator.mediaSession.playbackState = 'none';
+      navigator.mediaSession.metadata = null;
+    }
+  } catch {}
+}
+
+/**
  * Prompts user to exempt MusicFY from aggressive OEM battery killers (MIUI, ColorOS, OneUI).
  */
 export async function requestBatteryExemption(): Promise<void> {

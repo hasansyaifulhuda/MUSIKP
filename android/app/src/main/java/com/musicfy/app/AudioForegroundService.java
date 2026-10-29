@@ -152,12 +152,40 @@ public class AudioForegroundService extends Service {
             } else {
                 stopForeground(removeNotification);
             }
+            if (removeNotification) {
+                NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+                if (nm != null) {
+                    nm.cancel(NOTIFICATION_ID);
+                }
+            }
         } catch (Exception ignored) {}
     }
 
     @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        super.onTaskRemoved(rootIntent);
+        // The user explicitly closed/swiped away the app from recent apps!
+        try {
+            releaseServiceWakeLock();
+            stopForegroundCompat(true);
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                nm.cancel(NOTIFICATION_ID);
+            }
+        } catch (Exception ignored) {}
+        stopSelf();
+    }
+
+    @Override
     public void onDestroy() {
-        releaseServiceWakeLock();
+        try {
+            releaseServiceWakeLock();
+            stopForegroundCompat(true);
+            NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
+            if (nm != null) {
+                nm.cancel(NOTIFICATION_ID);
+            }
+        } catch (Exception ignored) {}
         instance = null;
         super.onDestroy();
     }
