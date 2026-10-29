@@ -33,6 +33,7 @@ import {
   SlidersHorizontal,
   ChevronUp,
   ExternalLink,
+  MoreVertical,
 } from 'lucide-react';
 import { cn, getHighResImage } from '@/lib/utils';
 import Image from 'next/image';
@@ -121,6 +122,14 @@ export function Player() {
   const [lyrics, setLyrics] = useState<LyricLine[]>([]);
   const [isSyncedLyrics, setIsSyncedLyrics] = useState(false);
   const [isLyricsLoading, setIsLyricsLoading] = useState(false);
+  const [isMobileUtilityMenuOpen, setIsMobileUtilityMenuOpen] = useState(false);
+
+  // Auto-close mobile utility dropdown when player is collapsed
+  useEffect(() => {
+    if (!isExpanded) {
+      setIsMobileUtilityMenuOpen(false);
+    }
+  }, [isExpanded]);
 
   // 1. Check Offline Status for active track
   useEffect(() => {
@@ -985,78 +994,270 @@ export function Player() {
                 </button>
               </div>
 
-              <div className="flex items-center gap-1.5">
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    openEqualizerModal();
-                  }}
-                  className={cn(
-                    'relative w-9 h-9 rounded-full hidden sm:flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer',
-                    isEqualizerEnabled ? 'text-[#1DB954]' : 'text-white/80 hover:text-white'
-                  )}
-                  title="Equalizer Suara"
-                >
-                  <SlidersHorizontal className="w-4 h-4" />
-                  {isEqualizerEnabled && (
-                    <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
-                  )}
-                </button>
+              {/* TOP RIGHT UTILITY CONTROLS: Desktop Direct Buttons + Mobile 3-Dots Popover Menu */}
+              <div>
+                {/* 1. DESKTOP VIEW: Directly displays all 4 utility buttons side-by-side */}
+                <div className="hidden md:flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      openEqualizerModal();
+                    }}
+                    className={cn(
+                      'relative w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer',
+                      isEqualizerEnabled ? 'text-[#1DB954]' : 'text-white/80 hover:text-white'
+                    )}
+                    title="Equalizer Suara"
+                  >
+                    <SlidersHorizontal className="w-4 h-4" />
+                    {isEqualizerEnabled && (
+                      <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
+                    )}
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    openSleepTimerModal();
-                  }}
-                  className={cn(
-                    'relative w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer',
-                    isSleepTimerActive ? 'text-[#1DB954]' : 'text-white/80 hover:text-white'
-                  )}
-                  title="Pengatur Waktu Tidur"
-                >
-                  <Moon className="w-4 h-4" />
-                  {isSleepTimerActive && (
-                    <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
-                  )}
-                </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      openSleepTimerModal();
+                    }}
+                    className={cn(
+                      'relative w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10 transition-colors cursor-pointer',
+                      isSleepTimerActive ? 'text-[#1DB954]' : 'text-white/80 hover:text-white'
+                    )}
+                    title="Pengatur Waktu Tidur"
+                  >
+                    <Moon className="w-4 h-4" />
+                    {isSleepTimerActive && (
+                      <span className="absolute top-1.5 right-1.5 w-1.5 h-1.5 bg-[#1DB954] rounded-full" />
+                    )}
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    openFloatingWidget();
-                    setExpanded(false);
-                  }}
-                  className="w-9 h-9 rounded-full hidden sm:flex items-center justify-center hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer"
-                  title="Mini-Player Melayang (PiP)"
-                >
-                  <ExternalLink className="w-4 h-4" />
-                </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      openFloatingWidget();
+                      setExpanded(false);
+                    }}
+                    className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer"
+                    title="Mini-Player Melayang (PiP)"
+                  >
+                    <ExternalLink className="w-4 h-4" />
+                  </button>
 
-                <button
-                  type="button"
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    e.preventDefault();
-                    handleDownload();
-                  }}
-                  disabled={isDownloading}
-                  className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
-                  title={isDownloaded ? 'Tersimpan offline' : 'Download'}
-                >
-                  {isDownloading ? (
-                    <Loader2 className="w-4 h-4 animate-spin text-[#1DB954]" />
-                  ) : isDownloaded ? (
-                    <Check className="w-4 h-4 text-[#1DB954]" />
-                  ) : (
-                    <Download className="w-4 h-4" />
-                  )}
-                </button>
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      handleDownload();
+                    }}
+                    disabled={isDownloading}
+                    className="w-9 h-9 rounded-full flex items-center justify-center hover:bg-white/10 text-white/80 hover:text-white transition-colors cursor-pointer disabled:opacity-50"
+                    title={isDownloaded ? 'Tersimpan offline' : 'Download'}
+                  >
+                    {isDownloading ? (
+                      <Loader2 className="w-4 h-4 animate-spin text-[#1DB954]" />
+                    ) : isDownloaded ? (
+                      <Check className="w-4 h-4 text-[#1DB954]" />
+                    ) : (
+                      <Download className="w-4 h-4" />
+                    )}
+                  </button>
+                </div>
+
+                {/* 2. MOBILE VIEW: Compact Single 3-Dots Button with Interactive Popover Menu */}
+                <div className="relative md:hidden">
+                  <button
+                    type="button"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      e.preventDefault();
+                      setIsMobileUtilityMenuOpen((prev) => !prev);
+                    }}
+                    className={cn(
+                      'relative w-9 h-9 rounded-full flex items-center justify-center transition-all cursor-pointer border',
+                      isMobileUtilityMenuOpen
+                        ? 'bg-white/20 text-white border-white/30 shadow-md'
+                        : 'bg-white/5 hover:bg-white/15 text-white/80 hover:text-white border-white/10'
+                    )}
+                    title="Menu Utilitas Pemutar"
+                    aria-label="Menu Utilitas Pemutar"
+                  >
+                    <MoreVertical className="w-4 h-4" />
+                    {(isEqualizerEnabled || isSleepTimerActive || isDownloading) && (
+                      <span className="absolute top-1.5 right-1.5 w-2 h-2 rounded-full bg-[#1DB954] ring-2 ring-black animate-pulse" />
+                    )}
+                  </button>
+
+                  {/* Interactive Popover Dropdown */}
+                  <AnimatePresence>
+                    {isMobileUtilityMenuOpen && (
+                      <>
+                        {/* Tap-outside Backdrop */}
+                        <div
+                          className="fixed inset-0 z-40 bg-black/40 backdrop-blur-[2px]"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setIsMobileUtilityMenuOpen(false);
+                          }}
+                        />
+
+                        {/* Dropdown Card */}
+                        <motion.div
+                          initial={{ opacity: 0, scale: 0.95, y: -6 }}
+                          animate={{ opacity: 1, scale: 1, y: 0 }}
+                          exit={{ opacity: 0, scale: 0.95, y: -6 }}
+                          transition={{ duration: 0.15, ease: 'easeOut' }}
+                          className="absolute top-11 right-0 w-64 z-50 bg-[#161616]/95 backdrop-blur-2xl border border-white/15 rounded-2xl p-2 shadow-2xl flex flex-col gap-1"
+                          onClick={(e) => e.stopPropagation()}
+                        >
+                          <div className="px-3 py-1.5 text-[10px] font-bold tracking-wider uppercase text-white/40 border-b border-white/5 flex items-center justify-between">
+                            <span>Menu Utilitas</span>
+                            <span className="text-[#1DB954] font-semibold text-[9px]">MusicFY</span>
+                          </div>
+
+                          {/* 1. Equalizer */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIsMobileUtilityMenuOpen(false);
+                              openEqualizerModal();
+                            }}
+                            className={cn(
+                              'flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors cursor-pointer w-full',
+                              isEqualizerEnabled ? 'bg-[#1DB954]/15 text-[#1DB954]' : 'hover:bg-white/10 text-white/90'
+                            )}
+                          >
+                            <div
+                              className={cn(
+                                'w-8 h-8 rounded-lg flex items-center justify-center shrink-0',
+                                isEqualizerEnabled ? 'bg-[#1DB954]/20 text-[#1DB954]' : 'bg-white/10 text-white/70'
+                              )}
+                            >
+                              <SlidersHorizontal className="w-4 h-4" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between">
+                                <p className="text-xs font-semibold text-white">Equalizer Suara</p>
+                                {isEqualizerEnabled && (
+                                  <span className="text-[10px] font-bold text-[#1DB954] bg-[#1DB954]/20 px-1.5 py-0.5 rounded-full">
+                                    Aktif
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-white/50 truncate">Atur bass & frekuensi audio</p>
+                            </div>
+                          </button>
+
+                          {/* 2. Sleep Timer */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIsMobileUtilityMenuOpen(false);
+                              openSleepTimerModal();
+                            }}
+                            className={cn(
+                              'flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors cursor-pointer w-full',
+                              isSleepTimerActive ? 'bg-[#1DB954]/15 text-[#1DB954]' : 'hover:bg-white/10 text-white/90'
+                            )}
+                          >
+                            <div
+                              className={cn(
+                                'w-8 h-8 rounded-lg flex items-center justify-center shrink-0',
+                                isSleepTimerActive ? 'bg-[#1DB954]/20 text-[#1DB954]' : 'bg-white/10 text-white/70'
+                              )}
+                            >
+                              <Moon className="w-4 h-4" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between">
+                                <p className="text-xs font-semibold text-white">Sleep Timer</p>
+                                {isSleepTimerActive && (
+                                  <span className="text-[10px] font-bold text-[#1DB954] bg-[#1DB954]/20 px-1.5 py-0.5 rounded-full">
+                                    Aktif
+                                  </span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-white/50 truncate">Waktu penghenti otomatis</p>
+                            </div>
+                          </button>
+
+                          {/* 3. Floating Widget (PiP) */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIsMobileUtilityMenuOpen(false);
+                              openFloatingWidget();
+                              setExpanded(false);
+                            }}
+                            className="flex items-center gap-3 px-3 py-2.5 rounded-xl text-left hover:bg-white/10 transition-colors cursor-pointer w-full text-white/90"
+                          >
+                            <div className="w-8 h-8 rounded-lg bg-white/10 text-white/70 flex items-center justify-center shrink-0">
+                              <ExternalLink className="w-4 h-4" />
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <p className="text-xs font-semibold text-white">Player Melayang (PiP)</p>
+                              <p className="text-[11px] text-white/50 truncate">Jendela mini saat multitask</p>
+                            </div>
+                          </button>
+
+                          {/* 4. Download Lagu */}
+                          <button
+                            type="button"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setIsMobileUtilityMenuOpen(false);
+                              handleDownload();
+                            }}
+                            disabled={isDownloading}
+                            className={cn(
+                              'flex items-center gap-3 px-3 py-2.5 rounded-xl text-left transition-colors cursor-pointer w-full',
+                              isDownloaded ? 'text-[#1DB954] hover:bg-white/5' : 'hover:bg-white/10 text-white/90',
+                              isDownloading && 'opacity-60 cursor-not-allowed'
+                            )}
+                          >
+                            <div
+                              className={cn(
+                                'w-8 h-8 rounded-lg flex items-center justify-center shrink-0',
+                                isDownloaded ? 'bg-[#1DB954]/20 text-[#1DB954]' : 'bg-white/10 text-white/70'
+                              )}
+                            >
+                              {isDownloading ? (
+                                <Loader2 className="w-4 h-4 animate-spin text-[#1DB954]" />
+                              ) : isDownloaded ? (
+                                <Check className="w-4 h-4 text-[#1DB954]" />
+                              ) : (
+                                <Download className="w-4 h-4" />
+                              )}
+                            </div>
+                            <div className="flex-1 min-w-0">
+                              <div className="flex items-center justify-between">
+                                <p className="text-xs font-semibold text-white">
+                                  {isDownloaded ? 'Tersimpan Offline' : isDownloading ? 'Mengunduh...' : 'Download Lagu'}
+                                </p>
+                                {isDownloaded && (
+                                  <span className="text-[10px] font-bold text-[#1DB954]">Offline</span>
+                                )}
+                              </div>
+                              <p className="text-[11px] text-white/50 truncate">
+                                {isDownloaded ? 'Tersimpan di IndexedDB lokal' : 'Dengarkan tanpa internet'}
+                              </p>
+                            </div>
+                          </button>
+                        </motion.div>
+                      </>
+                    )}
+                  </AnimatePresence>
+                </div>
               </div>
             </header>
 
