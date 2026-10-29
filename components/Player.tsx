@@ -929,7 +929,12 @@ export function Player() {
             </div>
 
             {/* Top Navigation Bar */}
-            <header className="relative z-10 flex items-center justify-between p-4 md:px-8 md:pt-6">
+            <header
+              className={cn(
+                'relative flex items-center justify-between p-4 md:px-8 md:pt-6 transition-[z-index]',
+                isMobileUtilityMenuOpen ? 'z-50' : 'z-30'
+              )}
+            >
               <button
                 type="button"
                 onClick={(e) => {
@@ -995,7 +1000,7 @@ export function Player() {
               </div>
 
               {/* TOP RIGHT UTILITY CONTROLS: Desktop Direct Buttons + Mobile 3-Dots Popover Menu */}
-              <div>
+              <div className="relative">
                 {/* 1. DESKTOP VIEW: Directly displays all 4 utility buttons side-by-side */}
                 <div className="hidden md:flex items-center gap-1.5">
                   <button
@@ -1110,11 +1115,11 @@ export function Player() {
 
                         {/* Dropdown Card */}
                         <motion.div
-                          initial={{ opacity: 0, scale: 0.95, y: -6 }}
+                          initial={{ opacity: 0, scale: 0.95, y: 4 }}
                           animate={{ opacity: 1, scale: 1, y: 0 }}
-                          exit={{ opacity: 0, scale: 0.95, y: -6 }}
+                          exit={{ opacity: 0, scale: 0.95, y: 4 }}
                           transition={{ duration: 0.15, ease: 'easeOut' }}
-                          className="absolute top-11 right-0 w-64 z-50 bg-[#161616]/95 backdrop-blur-2xl border border-white/15 rounded-2xl p-2 shadow-2xl flex flex-col gap-1"
+                          className="absolute top-full right-0 mt-2 w-64 max-w-[calc(100vw-32px)] z-50 bg-[#161616]/95 backdrop-blur-2xl border border-white/15 rounded-2xl p-2 shadow-2xl flex flex-col gap-1"
                           onClick={(e) => e.stopPropagation()}
                         >
                           <div className="px-3 py-1.5 text-[10px] font-bold tracking-wider uppercase text-white/40 border-b border-white/5 flex items-center justify-between">
@@ -1299,7 +1304,12 @@ export function Player() {
               {/* TAB 2: SYNCHRONIZED SCROLLING LYRICS */}
               {activeView === 'lyrics' && (
                 <div className="flex-1 min-h-0 flex flex-col relative w-full">
-                  <div className="absolute top-2 right-4 z-20">
+                  <div
+                    className={cn(
+                      'absolute top-2 right-4 z-10 transition-all duration-200',
+                      isMobileUtilityMenuOpen && 'opacity-0 pointer-events-none scale-90'
+                    )}
+                  >
                     <button
                       type="button"
                       onClick={(e) => {

@@ -25,6 +25,17 @@ import { useAudioQualityStore } from '@/lib/audioQualityStore';
 import { deduplicatedFetch } from '@/lib/clientDeduplication';
 import { useDevModalStore } from '@/lib/devModalStore';
 
+declare global {
+  interface Window {
+    AndroidMediaBridge?: {
+      updateMetadata: (title: string, artist: string, album: string, artworkUrl: string, durationMs: number) => void;
+      updatePlaybackState: (state: string, positionMs: number, durationMs: number) => void;
+      destroySession: () => void;
+    };
+    __handleAndroidMediaAction?: (action: string, arg?: any) => void;
+  }
+}
+
 export interface MusicContextType {
   currentTrack: Track | null;
   isPlaying: boolean;
@@ -66,6 +77,29 @@ const MusicContext = createContext<MusicContextType | null>(null);
 
 const LIKED_STORAGE_KEY = 'pmusic_liked_tracks';
 const AUDIO_SESSION_STORAGE_KEY = 'pmusic_audio_session_v1';
+
+/**
+ * Ensures artwork URLs are fully qualified HTTPS URLs so Android NotificationManager
+ * and lock screen controllers can load and display notification artwork without failures.
+ */
+function toAbsoluteArtworkUrl(url: string | undefined, size = 512): string {
+  if (!url) return `https://picsum.photos/seed/music/${size}/${size}`;
+  const hires = getHighResImage(url, size);
+  if (hires.startsWith('//')) {
+    return `https:${hires}`;
+  }
+  if (hires.startsWith('http://') || hires.startsWith('https://')) {
+    return hires;
+  }
+  if (typeof window !== 'undefined') {
+    try {
+      return new URL(hires, window.location.origin).href;
+    } catch {
+      return hires;
+    }
+  }
+  return hires;
+}
 
 export function MusicProvider({ children }: { children: React.ReactNode }) {
   // Store subscriptions
@@ -233,13 +267,21 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   // Update MediaSession Position State (Throttled for high performance & lockscreen scrubber)
   const updateMediaSessionPosition = useCallback((curTime: number, totalDur?: number) => {
+    const dur = totalDur || usePlayerStore.getState().duration || 0;
     if (
       typeof navigator !== 'undefined' &&
       'mediaSession' in navigator &&
       'setPositionState' in navigator.mediaSession
     ) {
-      const dur = totalDur || usePlayerStore.getState().duration || 0;
-      if (dur > 0 && typeof curTime === 'number' && !isNaN(curTime) && curTime >= 0) {
+      if (
+        dur > 0 &&
+        isFinite(dur) &&
+        !isNaN(dur) &&
+        typeof curTime === 'number' &&
+        !isNaN(curTime) &&
+        isFinite(curTime) &&
+        curTime >= 0
+      ) {
         try {
           navigator.mediaSession.setPositionState({
             duration: dur,
@@ -248,6 +290,18 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           });
         } catch {}
       }
+    }
+
+    // Synchronize lockscreen/notification scrubber in Android APK
+    if (typeof window !== 'undefined' && window.AndroidMediaBridge) {
+      try {
+        const isCurrentPlaying = usePlayerStore.getState().isPlaying;
+        window.AndroidMediaBridge.updatePlaybackState(
+          isCurrentPlaying ? 'playing' : 'paused',
+          Math.round(Math.max(0, curTime) * 1000),
+          Math.round(Math.max(0, dur) * 1000)
+        );
+      } catch {}
     }
   }, []);
 
@@ -456,8 +510,15 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
+    const handleLoadedMetadata = () => {
+      if (audio.duration && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
+        setDuration(audio.duration);
+        updateMediaSessionPosition(audio.currentTime, audio.duration);
+      }
+    };
+
     const handleDurationChange = () => {
-      if (audio.duration && !isNaN(audio.duration) && audio.duration > 0) {
+      if (audio.duration && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
         setDuration(audio.duration);
         updateMediaSessionPosition(audio.currentTime, audio.duration);
       }
@@ -473,6 +534,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
       }
+      if (audio.duration && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
+        updateMediaSessionPosition(audio.currentTime, audio.duration);
+      }
     };
 
     const handlePause = () => {
@@ -482,6 +546,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         setPlayingStore(false);
         if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'paused';
+        }
+        if (audio.duration && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
+          updateMediaSessionPosition(audio.currentTime, audio.duration);
         }
       }
     };
@@ -503,6 +570,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
       if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
         navigator.mediaSession.playbackState = 'playing';
+      }
+      if (audio.duration && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
+        updateMediaSessionPosition(audio.currentTime, audio.duration);
       }
     };
 
@@ -640,6 +710,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
     };
 
+    audio.addEventListener('loadedmetadata', handleLoadedMetadata);
     audio.addEventListener('timeupdate', handleTimeUpdate);
     audio.addEventListener('durationchange', handleDurationChange);
     audio.addEventListener('play', handlePlay);
@@ -650,6 +721,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     audio.addEventListener('error', handleError);
 
     return () => {
+      audio.removeEventListener('loadedmetadata', handleLoadedMetadata);
       audio.removeEventListener('timeupdate', handleTimeUpdate);
       audio.removeEventListener('durationchange', handleDurationChange);
       audio.removeEventListener('play', handlePlay);
@@ -784,6 +856,13 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             if (!ok) {
               setPlayingStore(false);
               setIsBuffering(false);
+            } else {
+              if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+                navigator.mediaSession.playbackState = 'playing';
+              }
+              if (audio.duration && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
+                updateMediaSessionPosition(audio.currentTime, audio.duration);
+              }
             }
           });
         }
@@ -833,6 +912,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
             setPlayingStore(false);
             setIsBuffering(false);
           } else {
+            if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+              navigator.mediaSession.playbackState = 'playing';
+            }
+            if (audio.duration && !isNaN(audio.duration) && isFinite(audio.duration) && audio.duration > 0) {
+              updateMediaSessionPosition(audio.currentTime, audio.duration);
+            }
             const crossfadeSec = useCrossfadeStore.getState().crossfadeDuration;
             if (crossfadeSec > 0) {
               const targetVol = Math.max(0, Math.min(1, volume / 100));
@@ -842,7 +927,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         });
       }
     },
-    [volume, isMuted, cleanupActiveBlobUrl, setIsBuffering, setPlayingStore, setProgress]
+    [volume, isMuted, cleanupActiveBlobUrl, setIsBuffering, setPlayingStore, setProgress, updateMediaSessionPosition]
   );
 
   // =========================================================================
@@ -853,6 +938,11 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       hasUserGestureRef.current = true;
       retryCountPerTrackRef.current.clear();
       initAudioContextKeepAlive();
+
+      // Request notification permission for Android/mobile notification controls if not yet granted
+      if (typeof window !== 'undefined' && 'Notification' in window && Notification.permission === 'default') {
+        Notification.requestPermission().catch(() => {});
+      }
 
       const targetVideoId = extractVideoId(track);
       if (!targetVideoId) {
@@ -1114,6 +1204,33 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     };
   }, [setPlaying, playNext, playPrev, seekTo, toggleShuffle, toggleRepeat]);
 
+  // Hook for Native Android MediaSession (Status Bar & Lockscreen Notification in APK)
+  useEffect(() => {
+    window.__handleAndroidMediaAction = (action: string, arg?: any) => {
+      try {
+        if (action === 'play') {
+          mediaActionsRef.current.play();
+        } else if (action === 'pause') {
+          mediaActionsRef.current.pause();
+        } else if (action === 'next') {
+          mediaActionsRef.current.next();
+        } else if (action === 'prev') {
+          mediaActionsRef.current.prev();
+        } else if (action === 'seekTo' && typeof arg === 'number') {
+          mediaActionsRef.current.seekTo(arg);
+        } else if (action === 'stop') {
+          mediaActionsRef.current.pause();
+        }
+      } catch (err) {
+        console.error('[AndroidMediaBridge] Action error:', err);
+      }
+    };
+
+    return () => {
+      delete window.__handleAndroidMediaAction;
+    };
+  }, []);
+
   useEffect(() => {
     if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
 
@@ -1147,6 +1264,10 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     safeSetActionHandler('play', async () => {
       try {
         resumeAudioContextSafely();
+        const audio = getPersistentAudioElement();
+        if (audio && audio.paused && audio.src) {
+          safePlayAudio(audio).catch(() => {});
+        }
         mediaActionsRef.current.play();
         if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'playing';
@@ -1159,6 +1280,10 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     // 2. Pause Action: Pauses audio smoothly on system interrupt without touching queue
     safeSetActionHandler('pause', () => {
       try {
+        const audio = getPersistentAudioElement();
+        if (audio && !audio.paused) {
+          pauseAudioSafely(audio);
+        }
         mediaActionsRef.current.pause();
         if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
           navigator.mediaSession.playbackState = 'paused';
@@ -1228,9 +1353,13 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     // 8. Stop Action: Handles mobile OS audio focus abandonment or notification dismiss
     safeSetActionHandler('stop', () => {
       try {
+        const audio = getPersistentAudioElement();
+        if (audio) {
+          pauseAudioSafely(audio);
+        }
         mediaActionsRef.current.pause();
         if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-          navigator.mediaSession.playbackState = 'paused';
+          navigator.mediaSession.playbackState = 'none';
         }
       } catch (err) {
         console.error('[MediaSession] Stop handler error:', err);
@@ -1244,15 +1373,20 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     };
   }, []);
 
-  // Sync MediaMetadata with Current Track
+  // Sync MediaMetadata with Current Track and Playback Status (Web & Android APK)
   useEffect(() => {
-    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return;
-
     if (!currentTrack) {
-      try {
-        navigator.mediaSession.metadata = null;
-        navigator.mediaSession.playbackState = 'none';
-      } catch {}
+      if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+        try {
+          navigator.mediaSession.metadata = null;
+          navigator.mediaSession.playbackState = 'none';
+        } catch {}
+      }
+      if (typeof window !== 'undefined' && window.AndroidMediaBridge) {
+        try {
+          window.AndroidMediaBridge.destroySession();
+        } catch {}
+      }
       return;
     }
 
@@ -1262,30 +1396,72 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       : (typeof currentTrack.artist === 'string' ? currentTrack.artist : currentTrack.artist?.name) || 'Unknown Artist';
 
     const albumTitle = (currentTrack as any).album?.name || (currentTrack as any).album || 'MusicFY';
+    const trackTitle = currentTrack.name || 'MusicFY Track';
+    const absoluteArtwork = toAbsoluteArtworkUrl(rawThumbnail, 512);
+    const durMs = Math.round((currentTrack.duration || 0) * 1000);
+    const posMs = Math.round((usePlayerStore.getState().progress || 0) * 1000);
 
-    try {
-      navigator.mediaSession.metadata = new MediaMetadata({
-        title: currentTrack.name || 'MusicFY Track',
-        artist: artist || 'MusicFY Artist',
-        album: albumTitle,
-        artwork: [
-          { src: getHighResImage(rawThumbnail, 96), sizes: '96x96', type: 'image/jpeg' },
-          { src: getHighResImage(rawThumbnail, 128), sizes: '128x128', type: 'image/jpeg' },
-          { src: getHighResImage(rawThumbnail, 192), sizes: '192x192', type: 'image/jpeg' },
-          { src: getHighResImage(rawThumbnail, 256), sizes: '256x256', type: 'image/jpeg' },
-          { src: getHighResImage(rawThumbnail, 384), sizes: '384x384', type: 'image/jpeg' },
-          { src: getHighResImage(rawThumbnail, 512), sizes: '512x512', type: 'image/jpeg' },
-        ],
-      });
-    } catch (err) {
-      console.warn('[MediaSession] Metadata update error:', err);
+    // 1. Standard Web MediaSession API (for Chrome / mobile browser & desktop)
+    if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+      if (typeof window !== 'undefined' && 'MediaMetadata' in window) {
+        try {
+          navigator.mediaSession.metadata = new MediaMetadata({
+            title: trackTitle,
+            artist: artist || 'MusicFY Artist',
+            album: albumTitle,
+            artwork: [
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 96), sizes: '96x96' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 128), sizes: '128x128' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 192), sizes: '192x192' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 256), sizes: '256x256' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 384), sizes: '384x384' },
+              { src: absoluteArtwork, sizes: '512x512' },
+            ],
+          });
+        } catch (err) {
+          console.warn('[MediaSession] Metadata update error:', err);
+        }
+      }
+
+      try {
+        navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+      } catch {}
     }
-  }, [currentTrack]);
 
-  // Sync MediaSession playbackState with Store isPlaying
+    // 2. Native Android MediaSession Bridge (for Capacitor APK Status Bar & Lockscreen Controls)
+    if (typeof window !== 'undefined' && window.AndroidMediaBridge) {
+      try {
+        window.AndroidMediaBridge.updateMetadata(trackTitle, artist, albumTitle, absoluteArtwork, durMs);
+        window.AndroidMediaBridge.updatePlaybackState(
+          isPlaying ? 'playing' : 'paused',
+          posMs,
+          durMs
+        );
+      } catch (err) {
+        console.warn('[AndroidMediaBridge] Metadata bridge error:', err);
+      }
+    }
+
+    const audio = getPersistentAudioElement();
+    if (audio) {
+      audio.title = `${trackTitle} • ${artist}`;
+      if (currentTrack.duration && isFinite(currentTrack.duration) && currentTrack.duration > 0) {
+        updateMediaSessionPosition(audio.currentTime || 0, currentTrack.duration);
+      }
+    }
+  }, [currentTrack, isPlaying, updateMediaSessionPosition]);
+
+  // Sync MediaSession playbackState with Store isPlaying (Web & Android APK)
   useEffect(() => {
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       navigator.mediaSession.playbackState = isPlaying ? 'playing' : 'paused';
+    }
+    if (typeof window !== 'undefined' && window.AndroidMediaBridge) {
+      try {
+        const curDur = Math.round((usePlayerStore.getState().duration || 0) * 1000);
+        const curPos = Math.round((usePlayerStore.getState().progress || 0) * 1000);
+        window.AndroidMediaBridge.updatePlaybackState(isPlaying ? 'playing' : 'paused', curPos, curDur);
+      } catch {}
     }
   }, [isPlaying]);
 

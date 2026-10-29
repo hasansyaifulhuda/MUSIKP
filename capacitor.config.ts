@@ -5,9 +5,9 @@ const config: CapacitorConfig = {
   appName: 'MusicFY',
   webDir: 'public',
   server: {
-    url: 'https://shanz.my.id',
-    cleartext: true
-  }
+  url: 'https://shanz.my.id',
+  cleartext: true
+}
 };
 
 export default config;

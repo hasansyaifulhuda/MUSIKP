@@ -50,13 +50,13 @@ export function getPersistentAudioElement(): HTMLAudioElement | null {
     el.setAttribute('webkit-playsinline', 'true');
     el.crossOrigin = 'anonymous'; // Vital for Web Audio API / AudioContext without CORS taint
 
-    // Offscreen, non-interfering styles
+    // Offscreen, non-interfering styles (non-zero size prevents Chromium background media discard)
     el.style.position = 'fixed';
     el.style.bottom = '0';
     el.style.left = '0';
-    el.style.width = '0';
-    el.style.height = '0';
-    el.style.opacity = '0';
+    el.style.width = '1px';
+    el.style.height = '1px';
+    el.style.opacity = '0.01';
     el.style.pointerEvents = 'none';
     el.style.zIndex = '-9999';
 
