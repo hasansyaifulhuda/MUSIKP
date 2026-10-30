@@ -10,7 +10,7 @@ import { toast } from '@/lib/toast';
  * Silakan ganti '#' dengan URL Google Drive, MediaFire, atau hosting APK Anda
  * Contoh: const APK_DOWNLOAD_URL = 'https://drive.google.com/file/d/YOUR_FILE_ID/view?usp=sharing';
  */
-const APK_DOWNLOAD_URL: string = '#';
+const APK_DOWNLOAD_URL: string = 'https://drive.google.com/file/d/100mmJJQLUmOf8vNNB7KsQEj3OxewGifl/view?usp=sharing';
 
 export default function InstallApkPage() {
   const router = useRouter();
