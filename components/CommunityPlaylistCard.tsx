@@ -7,6 +7,7 @@ import { useRouter } from 'next/navigation';
 import { usePlayerStore, Track } from '@/lib/store';
 import { db } from '@/lib/db';
 import { MarqueeText } from './MarqueeText';
+import { getCachedPlaylist, setCachedPlaylist, prefetchPlaylist, prefetchNavigation } from '@/lib/clientDataCache';
 
 interface PlaylistData {
   playlistId: string;
@@ -15,10 +16,8 @@ interface PlaylistData {
   videos: Track[];
 }
 
-const cardCache = new Map<string, PlaylistData>();
-
 export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playlistId }: { playlistId: string }) {
-  const cached = cardCache.get(playlistId);
+  const cached = getCachedPlaylist(playlistId);
   const [playlist, setPlaylist] = useState<PlaylistData | null>(cached || null);
   const [loading, setLoading] = useState(!cached);
   const [added, setAdded] = useState(false);
@@ -26,8 +25,9 @@ export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playl
   const playTrack = usePlayerStore((state) => state.playTrack);
 
   useEffect(() => {
-    if (cardCache.has(playlistId)) {
-      setPlaylist(cardCache.get(playlistId)!);
+    const existing = getCachedPlaylist(playlistId);
+    if (existing) {
+      setPlaylist(existing);
       setLoading(false);
       return;
     }
@@ -35,15 +35,13 @@ export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playl
     let active = true;
     const fetchPlaylist = async () => {
       try {
-        const res = await fetch(`/api/ytplaylist?id=${playlistId}`);
-        if (res.ok) {
-          const raw = await res.json();
-          const data = raw?.result !== undefined ? raw.result : raw;
+        const data = await prefetchPlaylist(playlistId);
+        if (data) {
           const formatted: PlaylistData = {
             ...data,
             videos: data.videos || data.songs || [],
           };
-          cardCache.set(playlistId, formatted);
+          setCachedPlaylist(playlistId, formatted);
           if (active) {
             setPlaylist(formatted);
           }
@@ -127,6 +125,8 @@ export const CommunityPlaylistCard = memo(function CommunityPlaylistCard({ playl
   return (
     <div
       onClick={handleClick}
+      onMouseEnter={() => prefetchNavigation(router, `/playlist/${playlist.playlistId}`, 'playlist', playlist.playlistId)}
+      onTouchStart={() => prefetchNavigation(router, `/playlist/${playlist.playlistId}`, 'playlist', playlist.playlistId)}
       className="w-[300px] md:w-[320px] bg-[#181818]/80 hover:bg-[#282828] rounded-2xl p-4 shrink-0 snap-start cursor-pointer transition-all duration-300 flex flex-col border border-white/5 shadow-lg group select-none"
     >
       <div className="flex gap-3.5 mb-4">

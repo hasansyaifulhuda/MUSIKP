@@ -11,6 +11,7 @@ import { VirtualTrackList } from '@/components/VirtualTrackList';
 import { PlaylistSkeleton } from '@/components/PlaylistSkeleton';
 import { MarqueeText } from '@/components/MarqueeText';
 import { toast } from '@/lib/toast';
+import { getCachedPlaylist, setCachedPlaylist, prefetchPlaylist } from '@/lib/clientDataCache';
 
 interface Playlist {
   id: string;
@@ -22,8 +23,10 @@ interface Playlist {
 export default function PlaylistPage() {
   const params = useParams();
   const router = useRouter();
-  const [playlist, setPlaylist] = useState<Playlist | null>(null);
-  const [loading, setLoading] = useState(true);
+  const playlistId = params?.id ? String(params.id) : '';
+  const initialCached = playlistId ? getCachedPlaylist(playlistId) : null;
+  const [playlist, setPlaylist] = useState<Playlist | null>(initialCached);
+  const [loading, setLoading] = useState(!initialCached);
   const [isSaved, setIsSaved] = useState(false);
   const [isEditingName, setIsEditingName] = useState(false);
   const [editedName, setEditedName] = useState('');
@@ -31,26 +34,36 @@ export default function PlaylistPage() {
 
   useEffect(() => {
     let active = true;
+    if (!playlistId) return;
+
+    const cached = getCachedPlaylist(playlistId);
+    if (cached && !playlist) {
+      setPlaylist(cached);
+      setLoading(false);
+    }
+
     const loadPlaylist = async () => {
-      if (!params.id) return;
       try {
-        const id = String(params.id);
+        const id = playlistId;
         const data = await db.getPlaylist(id);
         if (data && active) {
-          setPlaylist(data as Playlist);
+          const formatted: Playlist = data as Playlist;
+          setPlaylist(formatted);
+          setCachedPlaylist(id, formatted);
           setIsSaved(true);
         } else {
-          // Try fetching from YouTube Music API
-          const res = await fetch(`/api/ytplaylist?id=${id}`);
-          if (res.ok && active) {
-            const raw = await res.json();
-            const ytData = raw?.result !== undefined ? raw.result : raw;
-            setPlaylist({
+          // Try fetching from YouTube Music API with clientDataCache
+          if (!cached && !playlist) setLoading(true);
+          const ytData = await prefetchPlaylist(id);
+          if (ytData && active) {
+            const formatted: Playlist = {
               id: ytData.playlistId || ytData.id || id,
               name: ytData.name || ytData.title || 'Playlist',
               img: ytData.thumbnails?.[ytData.thumbnails.length - 1]?.url || '',
               tracks: ytData.videos || ytData.songs || [],
-            });
+            };
+            setPlaylist(formatted);
+            setCachedPlaylist(id, formatted);
             setIsSaved(false);
           }
         }
@@ -65,7 +78,7 @@ export default function PlaylistPage() {
     return () => {
       active = false;
     };
-  }, [params.id]);
+  }, [playlistId]);
 
   if (loading) {
     return <PlaylistSkeleton />;

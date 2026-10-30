@@ -17,7 +17,7 @@ const LYRICS_OFFSET_STORAGE_KEY = 'pmusic_lyrics_offsets_v1';
 export interface LyricsOffsetState {
   offsets: Record<string, number>; // Mapping videoId -> offset in seconds
   getOffset: (videoId: string | undefined | null) => number;
-  setOffset: (videoId: string, offsetSeconds: number) => void;
+  setOffset: (videoId: string, offsetSeconds: number, silent?: boolean) => void;
   adjustOffset: (videoId: string, deltaSeconds: number) => void;
   resetOffset: (videoId: string) => void;
 }
@@ -45,22 +45,24 @@ export const useLyricsOffsetStore = create<LyricsOffsetState>((set, get) => ({
     return typeof val === 'number' && !isNaN(val) ? val : 0;
   },
 
-  setOffset: (videoId: string, offsetSeconds: number) => {
+  setOffset: (videoId: string, offsetSeconds: number, silent: boolean = false) => {
     if (!videoId) return;
     const clamped = Math.max(-15, Math.min(15, Number(offsetSeconds.toFixed(1))));
     const updated = { ...get().offsets, [videoId]: clamped };
     set({ offsets: updated });
     debouncedLocalStorageSet(LYRICS_OFFSET_STORAGE_KEY, JSON.stringify(updated));
 
-    const sign = clamped > 0 ? `+${clamped}` : `${clamped}`;
-    toast.success(`Offset lirik diatur ke ${sign} detik`);
+    if (!silent) {
+      const sign = clamped > 0 ? `+${clamped}` : `${clamped}`;
+      toast.success(`Lirik diselaraskan (${sign}s)`);
+    }
   },
 
   adjustOffset: (videoId: string, deltaSeconds: number) => {
     if (!videoId) return;
     const current = get().getOffset(videoId);
     const next = current + deltaSeconds;
-    get().setOffset(videoId, next);
+    get().setOffset(videoId, next, false);
   },
 
   resetOffset: (videoId: string) => {
@@ -69,6 +71,6 @@ export const useLyricsOffsetStore = create<LyricsOffsetState>((set, get) => ({
     delete updated[videoId];
     set({ offsets: updated });
     debouncedLocalStorageSet(LYRICS_OFFSET_STORAGE_KEY, JSON.stringify(updated));
-    toast.info('Offset lirik direset ke 0.0 detik');
+    toast.info('Sinkronisasi lirik direset ke awal');
   },
 }));

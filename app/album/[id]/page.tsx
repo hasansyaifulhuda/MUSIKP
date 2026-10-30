@@ -9,37 +9,48 @@ import { getHighResImage } from '@/lib/utils';
 import AlbumClient from './AlbumClient';
 import AlbumTrackClient from './AlbumTrackClient';
 import { MarqueeText } from '@/components/MarqueeText';
+import { getCachedAlbum, setCachedAlbum, prefetchAlbum } from '@/lib/clientDataCache';
 
 export default function AlbumPage() {
   const params = useParams();
   const router = useRouter();
   const albumId = params?.id as string;
-  const [album, setAlbum] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const initialCached = albumId ? getCachedAlbum(albumId) : null;
+  const [album, setAlbum] = useState<any>(initialCached);
+  const [loading, setLoading] = useState(!initialCached);
   const [error, setError] = useState(false);
 
   useEffect(() => {
     let active = true;
-    const fetchAlbum = async () => {
-      if (!albumId) return;
+    if (!albumId) return;
+
+    const cached = getCachedAlbum(albumId);
+    if (cached && !album) {
+      setAlbum(cached);
+      setLoading(false);
+    }
+
+    const loadAlbum = async () => {
       try {
-        setLoading(true);
+        if (!cached && !album) setLoading(true);
         setError(false);
-        const res = await fetch(`/api/album?id=${encodeURIComponent(albumId)}`);
-        if (!res.ok) throw new Error('Album not found');
-        const raw = await res.json();
-        const data = raw?.result !== undefined ? raw.result : raw;
+        const data = await prefetchAlbum(albumId);
+        if (!data) {
+          if (!cached && !album) throw new Error('Album not found');
+          return;
+        }
         if (active) {
           setAlbum(data);
+          setCachedAlbum(albumId, data);
         }
       } catch (err) {
-        if (active) setError(true);
+        if (active && !cached && !album) setError(true);
       } finally {
         if (active) setLoading(false);
       }
     };
 
-    fetchAlbum();
+    loadAlbum();
     return () => {
       active = false;
     };

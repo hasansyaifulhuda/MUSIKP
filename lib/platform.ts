@@ -79,8 +79,18 @@ export function detectPlatform(): PlatformInfo {
   else if (isIOS) os = 'ios';
 
   // Windows OS typically applies 125% or 150% display scaling on 1080p/1440p displays.
-  // A calibrated scale factor of 14.5px/16px (~0.906) normalizes rem units to match Linux/Debian proportions.
-  const scaleFactor = isWindows ? 0.90625 : 1;
+  // Calibrate scaleFactor dynamically so Windows renders with identical proportional balance as Debian Linux.
+  let scaleFactor = 1;
+  if (isWindows && !isMobile) {
+    const dpr = typeof window !== 'undefined' ? window.devicePixelRatio || 1 : 1;
+    if (dpr >= 1.5) {
+      scaleFactor = 0.82; // 150% Windows scaling -> normalized to 13.1px
+    } else if (dpr >= 1.2) {
+      scaleFactor = 0.875; // 125% Windows scaling -> normalized to 14.0px
+    } else {
+      scaleFactor = 0.91; // 100% Windows scaling -> normalized to 14.5px
+    }
+  }
 
   return {
     os,
@@ -110,9 +120,18 @@ export function applyPlatformScaling(): PlatformInfo {
   root.setAttribute('data-is-apk', String(info.isAndroidApk));
   root.setAttribute('data-is-pwa', String(info.isPWA));
   root.setAttribute('data-is-mobile', String(info.isMobile));
+  root.setAttribute('data-is-windows-desktop', String(info.isWindows && !info.isMobile));
 
   // Expose CSS variable for components needing explicit pixel adjustments
   root.style.setProperty('--platform-scale', String(info.scaleFactor));
+
+  // Dynamically normalize root font-size for Windows to prevent oversized "zoom banget" UI
+  if (info.isWindows && !info.isMobile) {
+    const targetPx = Math.round(16 * info.scaleFactor * 10) / 10;
+    root.style.fontSize = `${targetPx}px`;
+  } else if (info.isDebian || info.isLinux) {
+    root.style.fontSize = '16px';
+  }
 
   return info;
 }

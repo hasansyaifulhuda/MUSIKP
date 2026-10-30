@@ -7,6 +7,8 @@ import { getHighResImage } from '@/lib/utils';
 import { usePlayerStore } from '@/lib/store';
 import { useRouter } from 'next/navigation';
 
+import { prefetchNavigation } from '@/lib/clientDataCache';
+
 interface MixedScrollProps {
   title: string;
   items: any[];
@@ -44,6 +46,16 @@ export const MixedScroll = memo(function MixedScroll({ title, items }: MixedScro
             ? item.artist.map((a: any) => a.name).join(', ')
             : item.artist?.name || 'Lagu';
 
+          const handlePrefetch = () => {
+            if (isArtist && item.artistId) {
+              prefetchNavigation(router, `/artist/${item.artistId}`, 'artist', item.artistId);
+            } else if (isPlaylist && item.playlistId) {
+              prefetchNavigation(router, `/playlist/${item.playlistId}`, 'playlist', item.playlistId);
+            } else if (isAlbum && item.albumId) {
+              prefetchNavigation(router, `/album/${item.albumId}`, 'album', item.albumId);
+            }
+          };
+
           const handleClick = () => {
             if (isArtist && item.artistId) {
               router.push(`/artist/${item.artistId}`);
@@ -63,6 +75,8 @@ export const MixedScroll = memo(function MixedScroll({ title, items }: MixedScro
               key={`${item.videoId || item.playlistId || item.albumId || item.artistId}-${i}`}
               className="flex-none w-36 md:w-44 p-3 bg-[#181818]/60 hover:bg-[#282828] rounded-md cursor-pointer group snap-start transition-colors duration-200 select-none shadow-sm flex flex-col gpu-accelerated content-auto"
               onClick={handleClick}
+              onMouseEnter={handlePrefetch}
+              onTouchStart={handlePrefetch}
             >
               <div
                 className={`relative w-full aspect-square overflow-hidden mb-3 shadow-md bg-black/40 ${

@@ -194,6 +194,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   // User gesture & playback failure safeguards
   const hasUserGestureRef = useRef<boolean>(false);
+  const playbackInitiatedAtRef = useRef<number>(0);
   const retryCountPerTrackRef = useRef<Map<string, number>>(new Map());
   const retryTimerRef = useRef<NodeJS.Timeout | null>(null);
   const lastErrorTimestampRef = useRef<number>(0);
@@ -280,45 +281,58 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   // Update MediaSession Position State (Throttled for high performance & lockscreen scrubber)
   const updateMediaSessionPosition = useCallback((curTime: number, totalDur?: number) => {
-    const dur = totalDur || usePlayerStore.getState().duration || 0;
-    const audio = getPersistentAudioElement();
-    const rate = audio && typeof audio.playbackRate === 'number' && isFinite(audio.playbackRate) ? audio.playbackRate : 1;
+    try {
+      const storeDur = usePlayerStore.getState().duration;
+      const dur = typeof totalDur === 'number' && Number.isFinite(totalDur) && totalDur > 0
+        ? totalDur
+        : (typeof storeDur === 'number' && Number.isFinite(storeDur) && storeDur > 0 ? storeDur : 0);
 
-    if (
-      typeof navigator !== 'undefined' &&
-      'mediaSession' in navigator &&
-      'setPositionState' in navigator.mediaSession
-    ) {
+      const audio = getPersistentAudioElement();
+      const rate = audio && typeof audio.playbackRate === 'number' && Number.isFinite(audio.playbackRate) && audio.playbackRate > 0
+        ? audio.playbackRate
+        : 1;
+
+      const pos = typeof curTime === 'number' && Number.isFinite(curTime) && curTime >= 0
+        ? curTime
+        : 0;
+
       if (
-        dur > 0 &&
-        isFinite(dur) &&
-        !isNaN(dur) &&
-        typeof curTime === 'number' &&
-        !isNaN(curTime) &&
-        isFinite(curTime) &&
-        curTime >= 0
+        typeof navigator !== 'undefined' &&
+        'mediaSession' in navigator &&
+        typeof navigator.mediaSession.setPositionState === 'function'
       ) {
+        // STRICT REQUIREMENT: Only call if duration is valid and finite (isFinite(duration) && duration > 0 && position <= duration)
+        if (
+          Number.isFinite(dur) &&
+          dur > 0 &&
+          Number.isFinite(pos) &&
+          pos >= 0 &&
+          pos <= dur
+        ) {
+          try {
+            navigator.mediaSession.setPositionState({
+              duration: dur,
+              playbackRate: rate,
+              position: pos,
+            });
+          } catch {
+            // Silently swallow any MediaSession position error to prevent unhandled exceptions or pause triggers
+          }
+        }
+      }
+
+      // Synchronize lockscreen/notification scrubber in Android APK
+      if (typeof window !== 'undefined' && window.AndroidMediaBridge) {
         try {
-          navigator.mediaSession.setPositionState({
-            duration: Math.max(1, dur),
-            playbackRate: rate,
-            position: Math.min(dur, Math.max(0, curTime)),
-          });
+          const isCurrentPlaying = usePlayerStore.getState().isPlaying;
+          window.AndroidMediaBridge.updatePlaybackState(
+            isCurrentPlaying ? 'playing' : 'paused',
+            Math.round(Math.max(0, pos) * 1000),
+            Math.round(Math.max(0, dur) * 1000)
+          );
         } catch {}
       }
-    }
-
-    // Synchronize lockscreen/notification scrubber in Android APK
-    if (typeof window !== 'undefined' && window.AndroidMediaBridge) {
-      try {
-        const isCurrentPlaying = usePlayerStore.getState().isPlaying;
-        window.AndroidMediaBridge.updatePlaybackState(
-          isCurrentPlaying ? 'playing' : 'paused',
-          Math.round(Math.max(0, curTime) * 1000),
-          Math.round(Math.max(0, dur) * 1000)
-        );
-      } catch {}
-    }
+    } catch {}
   }, []);
 
   // Poin 63: Background Audio Session Recovery (PWA State Restoration)
@@ -493,16 +507,30 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
         // Crossfade smooth volume fade-out when reaching track end
         const crossfadeSec = useCrossfadeStore.getState().crossfadeDuration;
+        const state = usePlayerStore.getState();
+        const curRepeat = state.repeatMode;
+        const targetVol = Math.max(0, Math.min(1, (state.volume ?? 100) / 100));
+        const hasNextTrack = state.repeatMode === 'all' || state.queueIndex + 1 < state.queue.length;
+
         if (
           crossfadeSec > 0 &&
+          curRepeat !== 'one' &&
+          hasNextTrack &&
           audio.duration > 15 &&
           audio.duration - cur <= crossfadeSec &&
           audio.duration - cur > 0 &&
           !audio.paused
         ) {
           const ratio = Math.max(0, (audio.duration - cur) / crossfadeSec);
-          const targetVol = Math.max(0, Math.min(1, (usePlayerStore.getState().volume ?? 100) / 100));
           audio.volume = targetVol * ratio;
+        } else if (
+          cur > 1.2 &&
+          !isMutedRef.current &&
+          Math.abs(audio.volume - targetVol) > 0.02 &&
+          (curRepeat === 'one' || audio.duration - cur > crossfadeSec)
+        ) {
+          // Self-healing: if repeat-one is active or outside crossfade window, guarantee full restored volume
+          audio.volume = targetVol;
         }
 
         // Poin 51: Predictive Smart Cache Preloading (Gapless Next Track Buffer)
@@ -543,6 +571,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const handlePlay = () => {
       setPlayingStore(true);
       setIsBuffering(false);
+      if (playbackInitiatedAtRef.current === 0) {
+        playbackInitiatedAtRef.current = Date.now();
+      }
       try {
         initAudioEffects();
         resumeAudioContextSafely();
@@ -576,6 +607,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const handlePlaying = () => {
       setIsBuffering(false);
       setPlayingStore(true);
+      if (playbackInitiatedAtRef.current === 0) {
+        playbackInitiatedAtRef.current = Date.now();
+      }
       // Reset retry count on successful track playback
       const activeTrack = usePlayerStore.getState().currentTrack;
       if (activeTrack) {
@@ -595,8 +629,17 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const handleEnded = () => {
       setIsBuffering(false);
       const curRepeat = usePlayerStore.getState().repeatMode;
+      const targetVol = Math.max(0, Math.min(1, (usePlayerStore.getState().volume ?? 100) / 100));
+
       if (curRepeat === 'one') {
         audio.currentTime = 0;
+        // CRITICAL FIX: Explicitly restore target volume on repeat loop
+        audio.volume = targetVol;
+        audio.muted = isMutedRef.current;
+        lastProgressRef.current = 0;
+        setProgress(0);
+        updateMediaSessionPosition(0, audio.duration || 0);
+
         try {
           const p = audio.play();
           if (p !== undefined) {
@@ -762,6 +805,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   // =========================================================================
   const playNext = useCallback(async () => {
     hasUserGestureRef.current = true;
+    playbackInitiatedAtRef.current = Date.now();
     retryCountPerTrackRef.current.clear();
     initAudioContextKeepAlive();
     setPlayingStore(true);
@@ -780,6 +824,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
 
   const playPrev = useCallback(() => {
     hasUserGestureRef.current = true;
+    playbackInitiatedAtRef.current = Date.now();
     retryCountPerTrackRef.current.clear();
     initAudioContextKeepAlive();
     setPlayingStore(true);
@@ -924,6 +969,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         audio.volume = Math.max(0, Math.min(1, volume / 100));
         audio.muted = isMuted;
         audio.load();
+      } else {
+        audio.volume = Math.max(0, Math.min(1, volume / 100));
+        audio.muted = isMuted;
       }
 
       if (autoPlay) {
@@ -956,6 +1004,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const playTrack = useCallback(
     async (track: any, queue?: any[], context?: 'playlist' | 'similar', forceIndex?: number) => {
       hasUserGestureRef.current = true;
+      playbackInitiatedAtRef.current = Date.now();
       retryCountPerTrackRef.current.clear();
       initAudioContextKeepAlive();
 
@@ -985,6 +1034,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
   const playQueueIndex = useCallback(
     async (index: number) => {
       hasUserGestureRef.current = true;
+      playbackInitiatedAtRef.current = Date.now();
       retryCountPerTrackRef.current.clear();
       initAudioContextKeepAlive();
       setPlayingStore(true);
@@ -1045,6 +1095,9 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     const audio = getPersistentAudioElement();
     const currentStore = usePlayerStore.getState();
     const nextPlaying = !currentStore.isPlaying;
+    if (nextPlaying) {
+      playbackInitiatedAtRef.current = Date.now();
+    }
     setPlayingStore(nextPlaying);
 
     if (audio) {
@@ -1094,6 +1147,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     async (playing: boolean) => {
       if (playing) {
         hasUserGestureRef.current = true;
+        playbackInitiatedAtRef.current = Date.now();
         initAudioContextKeepAlive();
       }
       setPlayingStore(playing);
@@ -1152,6 +1206,10 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       if (audio) {
         try {
           audio.currentTime = clamped;
+          const targetVol = Math.max(0, Math.min(1, (usePlayerStore.getState().volume ?? 100) / 100));
+          if (!isMutedRef.current && Math.abs(audio.volume - targetVol) > 0.05) {
+            audio.volume = targetVol;
+          }
           if (usePlayerStore.getState().isPlaying && audio.paused) {
             audio.play().catch(() => {});
           }
@@ -1229,8 +1287,18 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     window.__handleAndroidMediaAction = (action: string, arg?: any) => {
       try {
         if (action === 'play') {
+          playbackInitiatedAtRef.current = Date.now();
+          hasUserGestureRef.current = true;
           mediaActionsRef.current.play();
         } else if (action === 'pause') {
+          const audio = getPersistentAudioElement();
+          const curTime = audio ? audio.currentTime : 0;
+          const elapsed = Date.now() - playbackInitiatedAtRef.current;
+          // Ignore early auto-pause interruptions under 2 seconds on Android APK
+          if ((curTime < 2 || elapsed < 2000) && hasUserGestureRef.current) {
+            console.log('[AndroidMediaBridge] Ignored early auto-pause interruption (<2s), curTime:', curTime, 'elapsed:', elapsed);
+            return;
+          }
           mediaActionsRef.current.pause();
         } else if (action === 'next') {
           mediaActionsRef.current.next();
@@ -1296,6 +1364,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     // 1. Play Action: Resumes playback and restores audio focus safely
     safeSetActionHandler('play', async () => {
       try {
+        hasUserGestureRef.current = true;
+        playbackInitiatedAtRef.current = Date.now();
         resumeAudioContextSafely();
         const audio = getPersistentAudioElement();
         if (audio && audio.paused && audio.src) {
@@ -1314,6 +1384,22 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     safeSetActionHandler('pause', () => {
       try {
         const audio = getPersistentAudioElement();
+        const curTime = audio ? audio.currentTime : 0;
+        const elapsed = Date.now() - playbackInitiatedAtRef.current;
+
+        // Requirement: Prevent auto-pause at 0:01s on Android APK!
+        // Only respond if playback was genuinely initiated by user action,
+        // and ignore early interruptions if playback has been running for under 2 seconds.
+        if ((curTime < 2 || elapsed < 2000) && hasUserGestureRef.current) {
+          console.log('[MediaSession] Ignored early auto-pause interruption (<2s), curTime:', curTime, 'elapsed:', elapsed);
+          return;
+        }
+
+        if (!hasUserGestureRef.current) {
+          console.log('[MediaSession] Ignored pause action without user gesture');
+          return;
+        }
+
         if (audio && !audio.paused) {
           pauseAudioSafely(audio);
         }
@@ -1424,7 +1510,7 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     };
   }, [updateMediaSessionPosition]);
 
-  // Capacitor App Lifecycle & App State Change Listener (Requirement 1 & 2)
+  // Capacitor App Lifecycle & App State Change Listener
   useEffect(() => {
     let appStateSub: any = null;
     let pauseSub: any = null;
@@ -1434,36 +1520,17 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       try {
         const { App } = await import('@capacitor/app');
 
-        // 1. App State Change: active vs background/minimized
+        // 1. App State Change: active vs background/minimized/swiped
         appStateSub = await App.addListener('appStateChange', (state) => {
-          // If the app is sent to background / closed and music is NOT playing,
-          // immediately reset mediaSession and dismiss notification!
-          if (!state.isActive) {
-            const isPlayingNow = usePlayerStore.getState().isPlaying;
-            if (!isPlayingNow) {
-              if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-                try {
-                  navigator.mediaSession.playbackState = 'none';
-                  navigator.mediaSession.metadata = null;
-                } catch {}
-              }
-              terminateBackgroundAudio();
-            }
-          }
+          // CRITICAL: DO NOT pause or reset playback when state.isActive === false!
+          // MusicFY requires uninterrupted background audio playback when minimized or screen is locked.
+          // App state change to inactive must never interrupt actively running playback.
         });
 
         // 2. Pause listener when app loses focus
         pauseSub = await App.addListener('pause', () => {
-          const isPlayingNow = usePlayerStore.getState().isPlaying;
-          if (!isPlayingNow) {
-            if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
-              try {
-                navigator.mediaSession.playbackState = 'none';
-                navigator.mediaSession.metadata = null;
-              } catch {}
-            }
-            terminateBackgroundAudio();
-          }
+          // CRITICAL: DO NOT pause audio or reset session on native Activity pause!
+          // Background audio playback must continue running smoothly.
         });
 
         // 3. Back Button: When exiting root on Android, dismiss notification if paused
@@ -1557,6 +1624,11 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
               { src: absoluteArtwork, sizes: '512x512', type: artType },
             ],
           });
+
+          // Immediately sync position state with duration
+          if (currentTrack.duration && currentTrack.duration > 0) {
+            updateMediaSessionPosition(usePlayerStore.getState().progress || 0, currentTrack.duration);
+          }
         } catch (err) {
           console.warn('[MediaSession] Metadata update error:', err);
         }
@@ -1713,7 +1785,6 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
         wakeLockRef.current.release().catch(() => {});
         wakeLockRef.current = null;
       }
-      stopBackgroundAudio();
     };
   }, [isPlaying]);
 

@@ -11,14 +11,27 @@ import { SearchSkeleton } from '@/components/SearchSkeleton';
 import { useDebounce } from '@/hooks/usePerformance';
 
 import { deduplicatedFetch } from '@/lib/clientDeduplication';
+import {
+  getCachedSearch,
+  setCachedSearch,
+  getCachedSuggestions,
+  setCachedSuggestions,
+  prefetchSuggestions,
+} from '@/lib/clientDataCache';
+
+let searchStateCache = {
+  query: '',
+  results: [] as any[],
+  activeTab: 'Semua',
+};
 
 export default function Search() {
-  const [query, setQuery] = useState('');
-  const [results, setResults] = useState<any[]>([]);
+  const [query, setQuery] = useState(searchStateCache.query);
+  const [results, setResults] = useState<any[]>(searchStateCache.results);
   const [suggestions, setSuggestions] = useState<string[]>([]);
   const [recentSearches, setRecentSearches] = useState<RecentSearch[]>([]);
   const [loading, setLoading] = useState(false);
-  const [activeTab, setActiveTab] = useState('Semua');
+  const [activeTab, setActiveTab] = useState(searchStateCache.activeTab);
   const [isFocused, setIsFocused] = useState(false);
   const router = useRouter();
 
@@ -56,15 +69,16 @@ export default function Search() {
 
     const fetchSuggestions = async () => {
       if (debouncedQuery.trim()) {
+        const cachedSuggest = getCachedSuggestions(debouncedQuery);
+        if (cachedSuggest && active) {
+          setSuggestions(cachedSuggest);
+          return;
+        }
         try {
-          const raw = await deduplicatedFetch(
-            `/api/suggest?q=${encodeURIComponent(debouncedQuery)}`,
-            { signal: controller.signal },
-            10000
-          );
+          const data = await prefetchSuggestions(debouncedQuery);
           if (active) {
-            const data = Array.isArray(raw) ? raw : raw?.result || [];
             setSuggestions(data);
+            setCachedSuggestions(debouncedQuery, data);
           }
         } catch (err: any) {
           if (err?.name !== 'AbortError' && active) {
@@ -87,18 +101,30 @@ export default function Search() {
 
   const handleSearch = useCallback(async (searchQuery: string) => {
     if (!searchQuery.trim()) return;
-    setLoading(true);
+    const cleanQ = searchQuery.trim();
+    setQuery(cleanQ);
     setIsFocused(false);
 
     // Save to recent searches
-    await db.addRecentSearch(searchQuery);
+    await db.addRecentSearch(cleanQ);
     const searches = await db.getRecentSearches();
     setRecentSearches(searches);
+
+    // Check clientDataCache for instant 0ms result
+    const cachedResults = getCachedSearch(cleanQ);
+    if (cachedResults && cachedResults.length > 0) {
+      setResults(cachedResults);
+      setLoading(false);
+      searchStateCache = { query: cleanQ, results: cachedResults, activeTab };
+      return;
+    }
+
+    setLoading(true);
 
     // If offline: search locally within downloaded IndexedDB tracks (Batch 3 - Poin 72)
     if (typeof navigator !== 'undefined' && !navigator.onLine) {
       try {
-        const localMatches = await db.searchLocalOffline(searchQuery);
+        const localMatches = await db.searchLocalOffline(cleanQ);
         setResults(localMatches);
       } catch (err) {
         console.warn('Offline local search failed:', err);
@@ -109,17 +135,19 @@ export default function Search() {
 
     try {
       const raw = await deduplicatedFetch(
-        `/api/search?q=${encodeURIComponent(searchQuery)}`,
+        `/api/search?q=${encodeURIComponent(cleanQ)}`,
         undefined,
-        30000 // 30 seconds client deduplication cache
+        1000 * 60 * 15 // 15 mins client deduplication cache
       );
       const data = Array.isArray(raw) ? raw : raw?.result || [];
       setResults(data);
+      setCachedSearch(cleanQ, 'all', data);
+      searchStateCache = { query: cleanQ, results: data, activeTab };
     } catch (error) {
       console.error('Search request error:', error);
       // Fallback to local offline tracks if online search fails
       try {
-        const localFallback = await db.searchLocalOffline(searchQuery);
+        const localFallback = await db.searchLocalOffline(cleanQ);
         if (localFallback.length > 0) {
           setResults(localFallback);
         }
@@ -127,7 +155,7 @@ export default function Search() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [activeTab]);
 
   const onSubmit = useCallback((e: React.FormEvent) => {
     e.preventDefault();

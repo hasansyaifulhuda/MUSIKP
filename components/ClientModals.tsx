@@ -53,29 +53,67 @@ const DevDiagnosticModal = dynamic(
 );
 
 import { ComponentErrorBoundary } from '@/components/ComponentErrorBoundary';
+import { usePlayerStore } from '@/lib/store';
+import { useEqualizerStore } from '@/lib/audioEffects';
+import { useSleepTimerStore } from '@/lib/sleepTimerStore';
+import { useContextMenuStore } from '@/lib/contextMenuStore';
+import { useDevModalStore } from '@/lib/devModalStore';
+import { useFloatingWidgetStore } from '@/lib/floatingWidgetStore';
 
 export function ClientModals() {
+  const hasTrackToAdd = usePlayerStore((state) => state.trackToAdd !== null);
+  const isEqualizerOpen = useEqualizerStore((state) => state.isModalOpen);
+  const isSleepTimerOpen = useSleepTimerStore((state) => state.isModalOpen);
+  const isContextMenuOpen = useContextMenuStore((state) => state.isOpen);
+  const isDevModalOpen = useDevModalStore((state) => state.isOpen);
+
+  const isWidgetEnabled = useFloatingWidgetStore((state) => state.isEnabled);
+  const isWidgetOpen = useFloatingWidgetStore((state) => state.isOpen);
+  const hasCurrentTrack = usePlayerStore((state) => Boolean(state.currentTrack));
+  const isPlayerExpanded = usePlayerStore((state) => state.isExpanded);
+
+  const showFloatingWidget = Boolean(isWidgetEnabled && isWidgetOpen && hasCurrentTrack && !isPlayerExpanded);
+
   return (
     <>
       <ConsoleFilter />
-      <ComponentErrorBoundary fallbackTitle="Playlist Modal">
-        <AddToPlaylistModal />
-      </ComponentErrorBoundary>
-      <ComponentErrorBoundary fallbackTitle="Sleep Timer Modal">
-        <SleepTimerModal />
-      </ComponentErrorBoundary>
-      <ComponentErrorBoundary fallbackTitle="Equalizer Modal">
-        <EqualizerModal />
-      </ComponentErrorBoundary>
-      <ComponentErrorBoundary fallbackTitle="Floating Widget">
-        <FloatingWidget />
-      </ComponentErrorBoundary>
-      <ComponentErrorBoundary fallbackTitle="Context Menu">
-        <TrackContextMenu />
-      </ComponentErrorBoundary>
-      <ComponentErrorBoundary fallbackTitle="Developer Diagnostic Modal">
-        <DevDiagnosticModal />
-      </ComponentErrorBoundary>
+
+      {hasTrackToAdd && (
+        <ComponentErrorBoundary fallbackTitle="Playlist Modal">
+          <AddToPlaylistModal />
+        </ComponentErrorBoundary>
+      )}
+
+      {isSleepTimerOpen && (
+        <ComponentErrorBoundary fallbackTitle="Sleep Timer Modal">
+          <SleepTimerModal />
+        </ComponentErrorBoundary>
+      )}
+
+      {isEqualizerOpen && (
+        <ComponentErrorBoundary fallbackTitle="Equalizer Modal">
+          <EqualizerModal />
+        </ComponentErrorBoundary>
+      )}
+
+      {showFloatingWidget && (
+        <ComponentErrorBoundary fallbackTitle="Floating Widget">
+          <FloatingWidget />
+        </ComponentErrorBoundary>
+      )}
+
+      {isContextMenuOpen && (
+        <ComponentErrorBoundary fallbackTitle="Context Menu">
+          <TrackContextMenu />
+        </ComponentErrorBoundary>
+      )}
+
+      {isDevModalOpen && (
+        <ComponentErrorBoundary fallbackTitle="Developer Diagnostic Modal">
+          <DevDiagnosticModal />
+        </ComponentErrorBoundary>
+      )}
+
       <ToastContainer />
       <PWARegister />
       <OfflineIndicator />

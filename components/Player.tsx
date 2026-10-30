@@ -48,9 +48,20 @@ import {
   saveAllCachedLyrics,
   clearAllCachedLyrics,
 } from '@/lib/lyricsCache';
+import { useLyricsOffsetStore } from '@/lib/lyricsOffsetStore';
+import { autoCalibrateSilenceOffset } from '@/lib/smartLyricsSync';
 import { useMusic } from '@/context/MusicContext';
-import { AudioVisualizer } from './AudioVisualizer';
-import { FullScreenLyrics } from './FullScreenLyrics';
+import dynamic from 'next/dynamic';
+
+const AudioVisualizer = dynamic(
+  () => import('./AudioVisualizer').then((mod) => mod.AudioVisualizer),
+  { ssr: false }
+);
+
+const FullScreenLyrics = dynamic(
+  () => import('./FullScreenLyrics').then((mod) => mod.FullScreenLyrics),
+  { ssr: false }
+);
 import { FloatingLyricsPill } from './FloatingLyricsPill';
 import { useSleepTimerStore } from '@/lib/sleepTimerStore';
 import { useEqualizerStore } from '@/lib/audioEffects';
@@ -122,6 +133,7 @@ export function Player() {
   const [lyrics, setLyrics] = useState<LyricLine[]>([]);
   const [isSyncedLyrics, setIsSyncedLyrics] = useState(false);
   const [isLyricsLoading, setIsLyricsLoading] = useState(false);
+  const [lyricsSearchPass, setLyricsSearchPass] = useState(1);
   const [isMobileUtilityMenuOpen, setIsMobileUtilityMenuOpen] = useState(false);
 
   // Auto-close mobile utility dropdown when player is collapsed
@@ -190,12 +202,13 @@ export function Player() {
     };
   }, [currentVideoId]);
 
-  // 2. Fetch Synchronized Lyrics (Multi-Tier Caching + Strict 3.8s AbortController Timeout)
+  // 2. Fetch Synchronized Lyrics (Multi-Tier Caching + Cascading 5-Pass Auto-Search)
   useEffect(() => {
     if (!currentVideoId) {
       setLyrics([]);
       setIsSyncedLyrics(false);
       setIsLyricsLoading(false);
+      setLyricsSearchPass(1);
       return;
     }
 
@@ -207,15 +220,16 @@ export function Player() {
         setLyrics(fastHit.lyrics);
         setIsSyncedLyrics(Boolean(fastHit.synced));
         setIsLyricsLoading(false);
+        setLyricsSearchPass(1);
         return; // Instant 0ms Cache Hit!
       }
     }
 
     let isCancelled = false;
     setIsLyricsLoading(true);
+    setLyricsSearchPass(1);
 
-    const controller = new AbortController();
-    let timeoutId: NodeJS.Timeout | null = null;
+    const abortController = new AbortController();
 
     const loadLyricsForCurrentTrack = async () => {
       // 2. TIER 2: ASYNC INDEXEDDB DEEP CACHE (Offline Track + Compressed Metadata Cache)
@@ -227,6 +241,7 @@ export function Player() {
               setLyrics(deepHit.lyrics);
               setIsSyncedLyrics(Boolean(deepHit.synced));
               setIsLyricsLoading(false);
+              setLyricsSearchPass(1);
             }
             return; // Found in IndexedDB!
           }
@@ -243,73 +258,158 @@ export function Player() {
         return;
       }
 
-      // 4. TIER 3: NON-BLOCKING BACKGROUND FETCH WITH SILENT 3.2s TIMEOUT
-      timeoutId = setTimeout(() => {
-        try {
-          controller.abort('LYRICS_TIMEOUT');
-        } catch {}
-      }, 3200);
-
+      // 4. CASCADING 5-PASS AUTOMATIC RETRY SEARCH
+      // Automatically iterates through metadata variations and fallback queries (up to 5 passes)
+      // until valid synchronized or plain lyrics are found.
       const dur = Math.round(duration || currentTrackDuration || 200);
-      const url = `/api/lyrics?id=${encodeURIComponent(currentVideoId)}&title=${encodeURIComponent(
-        currentTrackName || ''
-      )}&artist=${encodeURIComponent(currentArtistName)}&duration=${dur}${lyricsRetryCount > 0 ? '&force=true' : ''}`;
 
-      try {
-        const response = await fetch(url, { signal: controller.signal });
-        if (response.ok) {
-          const data = await response.json();
-          const payload = data?.result !== undefined ? data.result : data;
-          if (!isCancelled) {
+      // Clean metadata and extract primary artist for targeted passes
+      const rawA = currentArtistName || '';
+      const primaryArtist = rawA
+        .split(/[,&x\/]|(?:\b(?:feat|ft|featuring|x)\b)/i)[0]
+        .replace(/\s*-\s*Topic$/i, '')
+        .replace(/\s*Official$/i, '')
+        .replace(/VEVO$/i, '')
+        .trim();
+
+      const rawT = currentTrackName || '';
+      // Simplified title stripped of parentheses, brackets, and subtitles
+      const simplifiedTitle = rawT
+        .replace(/\s*[\(\[\{][^\)\]\}]*[\)\]\}]/g, '')
+        .replace(/^\s*\d{1,3}[\.\-\s]+\s*/, '')
+        .replace(/\s*[\|\/].*$/, '')
+        .trim();
+
+      const searchPasses = [
+        // Pass 1: Standard clean metadata search
+        {
+          title: rawT,
+          artist: rawA,
+          force: lyricsRetryCount > 0,
+          passNumber: 1,
+          timeout: 6000,
+        },
+        // Pass 2: Primary artist search (eliminates feat / multi-artist 404s on LRCLIB)
+        {
+          title: rawT,
+          artist: primaryArtist || rawA,
+          force: false,
+          passNumber: 2,
+          timeout: 5500,
+        },
+        // Pass 3: Simplified title without parentheticals or subtitles (e.g. "(OST)", "[Live]", "(From ...)")
+        {
+          title: simplifiedTitle || rawT,
+          artist: primaryArtist || rawA,
+          force: false,
+          passNumber: 3,
+          timeout: 5000,
+        },
+        // Pass 4: Broad title-only search across LRCLIB with duration matching
+        {
+          title: simplifiedTitle || rawT,
+          artist: '',
+          force: false,
+          passNumber: 4,
+          timeout: 5000,
+        },
+        // Pass 5: Deep fallback to YouTube Music native transcript & secondary sources with forced cache purge
+        {
+          title: rawT,
+          artist: rawA,
+          force: true,
+          passNumber: 5,
+          timeout: 6500,
+        },
+      ];
+
+      let foundValidLyrics = false;
+
+      for (const passConfig of searchPasses) {
+        if (isCancelled || foundValidLyrics) break;
+
+        if (!isCancelled) {
+          setLyricsSearchPass(passConfig.passNumber);
+        }
+
+        const passController = new AbortController();
+        const passTimer = setTimeout(() => {
+          try {
+            passController.abort('PASS_TIMEOUT');
+          } catch {}
+        }, passConfig.timeout);
+
+        try {
+          const url = `/api/lyrics?id=${encodeURIComponent(currentVideoId)}&title=${encodeURIComponent(
+            passConfig.title
+          )}&artist=${encodeURIComponent(passConfig.artist)}&duration=${dur}&pass=${passConfig.passNumber}${
+            passConfig.force ? '&force=true' : ''
+          }`;
+
+          const response = await fetch(url, { signal: passController.signal });
+          clearTimeout(passTimer);
+
+          if (response.ok) {
+            const data = await response.json();
+            const payload = data?.result !== undefined ? data.result : data;
             if (Array.isArray(payload?.lyrics) && payload.lyrics.length > 0) {
               const cleanLyrics = await lyricsWorkerClient.normalize(payload.lyrics, dur);
               const syncedVal = Boolean(payload.synced);
-              setLyrics(cleanLyrics);
-              setIsSyncedLyrics(syncedVal);
 
-              // Simpan ke seluruh tier cache (In-Memory Map + LocalStorage + IndexedDB)
-              saveAllCachedLyrics(currentVideoId, cleanLyrics, syncedVal, payload.provider).catch(() => {});
+              if (!isCancelled) {
+                setLyrics(cleanLyrics);
+                setIsSyncedLyrics(syncedVal);
+                foundValidLyrics = true;
 
-              // Update offline track item jika lagu sudah tersimpan offline
-              try {
-                const offItem = await db.getOfflineTrack(currentVideoId);
-                if (offItem) {
-                  offItem.lyrics = cleanLyrics;
-                  offItem.isSyncedLyrics = syncedVal;
-                  offItem.synced = syncedVal;
-                  await db.saveOfflineTrack(offItem.track, offItem.blob, { lyrics: cleanLyrics, synced: syncedVal });
+                // Auto-calibrate intro silence offset if candidate duration differs slightly from audio duration
+                autoCalibrateSilenceOffset(currentVideoId, payload.candidateDuration, dur);
+
+                // Save to all caching tiers (In-Memory Map + LocalStorage + IndexedDB)
+                saveAllCachedLyrics(currentVideoId, cleanLyrics, syncedVal, payload.provider).catch(() => {});
+
+                // Update offline track item if already downloaded
+                try {
+                  const offItem = await db.getOfflineTrack(currentVideoId);
+                  if (offItem) {
+                    offItem.lyrics = cleanLyrics;
+                    offItem.isSyncedLyrics = syncedVal;
+                    offItem.synced = syncedVal;
+                    await db.saveOfflineTrack(offItem.track, offItem.blob, { lyrics: cleanLyrics, synced: syncedVal });
+                  }
+                } catch {}
+
+                if (lyricsRetryCount > 0 || passConfig.passNumber > 1) {
+                  toast.success(
+                    passConfig.passNumber > 1
+                      ? `Lirik sinkron ditemukan otomatis (Percobaan ${passConfig.passNumber}/5)`
+                      : 'Lirik berhasil ditemukan!'
+                  );
                 }
-              } catch {}
-
-              if (lyricsRetryCount > 0) {
-                toast.success('Lirik berhasil ditemukan!');
               }
-            } else {
-              setLyrics([]);
-              setIsSyncedLyrics(false);
-              if (lyricsRetryCount > 0) {
-                toast.info('Lirik belum tersedia untuk lagu ini.');
-              }
+              break; // Success! Break pass loop immediately
             }
           }
-        } else {
-          if (!isCancelled) {
-            setLyrics([]);
-            setIsSyncedLyrics(false);
-          }
+        } catch {
+          clearTimeout(passTimer);
+          // Pass failed or timed out: proceed to next fallback pass automatically
         }
-      } catch (err: any) {
-        if (!isCancelled) {
-          // 100% Non-blocking silent fallback without freezing player UI
-          setLyrics([]);
-          setIsSyncedLyrics(false);
-          if (lyricsRetryCount > 0 && err !== 'LYRICS_TIMEOUT' && err?.name !== 'AbortError') {
-            toast.info('Pencarian lirik memakan waktu terlalu lama. Silakan coba sesaat lagi.');
-          }
+
+        // Brief 250ms pause before attempting next fallback pass
+        if (!foundValidLyrics && !isCancelled && passConfig.passNumber < searchPasses.length) {
+          await new Promise((resolve) => setTimeout(resolve, 250));
         }
-      } finally {
-        if (timeoutId) clearTimeout(timeoutId);
-        if (!isCancelled) setIsLyricsLoading(false);
+      }
+
+      if (!foundValidLyrics && !isCancelled) {
+        setLyrics([]);
+        setIsSyncedLyrics(false);
+        if (lyricsRetryCount > 0) {
+          toast.info('Lirik belum tersedia untuk lagu ini setelah 5 percobaan pencarian otomatis.');
+        }
+      }
+
+      if (!isCancelled) {
+        setIsLyricsLoading(false);
       }
     };
 
@@ -321,14 +421,13 @@ export function Player() {
 
     return () => {
       isCancelled = true;
-      if (timeoutId) clearTimeout(timeoutId);
       if (typeof window !== 'undefined' && 'cancelIdleCallback' in window && typeof idleId === 'number') {
         (window as any).cancelIdleCallback(idleId);
       } else if (idleId) {
         clearTimeout(idleId);
       }
       try {
-        controller.abort();
+        abortController.abort();
       } catch {}
     };
   }, [currentVideoId, currentTrackName, currentArtistName, currentTrackDuration, duration, lyricsRetryCount]);
@@ -493,10 +592,12 @@ export function Player() {
 
   const handleLyricClick = useCallback(
     (time: number) => {
-      seekTo(time);
+      const currentOffset = useLyricsOffsetStore.getState().getOffset(currentVideoId);
+      const targetAudioTime = Math.max(0, time - currentOffset);
+      seekTo(targetAudioTime);
       if (!isPlaying) setPlaying(true);
     },
-    [seekTo, isPlaying, setPlaying]
+    [seekTo, isPlaying, setPlaying, currentVideoId]
   );
 
   // Poin 84: Mini-Player Touch Gestures (Swipe left: Next, Swipe right: Prev, Swipe up: Expand)
@@ -1331,6 +1432,7 @@ export function Player() {
                     onSeek={handleLyricClick}
                     isLoading={isLyricsLoading}
                     isSynced={isSyncedLyrics}
+                    searchPass={lyricsSearchPass}
                   />
                 </div>
               )}

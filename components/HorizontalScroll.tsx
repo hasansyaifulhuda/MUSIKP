@@ -6,6 +6,7 @@ import Image from 'next/image';
 import { getHighResImage } from '@/lib/utils';
 import { Play, ArrowRight } from 'lucide-react';
 import { useRouter } from 'next/navigation';
+import { prefetchNavigation } from '@/lib/clientDataCache';
 
 interface HorizontalScrollProps {
   title: string;
@@ -50,10 +51,20 @@ export const HorizontalScroll = memo(function HorizontalScroll({ title, tracks, 
       }
     };
 
+    const handlePrefetchHeader = () => {
+      if (artistId) {
+        prefetchNavigation(router, `/artist/${artistId}`, 'artist', artistId);
+      } else {
+        router.prefetch(`/search?q=${encodeURIComponent(mainTitle)}`);
+      }
+    };
+
     headerContent = (
       <div
         className="flex items-center justify-between mb-3 px-4 cursor-pointer group select-none"
         onClick={handleHeaderClick}
+        onMouseEnter={handlePrefetchHeader}
+        onTouchStart={handlePrefetchHeader}
       >
         <div className="flex items-center gap-3">
           {headerImage && (

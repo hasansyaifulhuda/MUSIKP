@@ -17,7 +17,7 @@ export function RouteContainer({ children }: RouteContainerProps) {
   const pathname = usePathname();
 
   return (
-    <ErrorBoundary key={pathname} name={`Halaman: ${pathname}`}>
+    <ErrorBoundary resetKey={pathname} name={`Halaman: ${pathname}`}>
       {children}
     </ErrorBoundary>
   );

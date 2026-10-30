@@ -8,6 +8,7 @@ interface Props {
   fallback?: ReactNode;
   name?: string;
   onReset?: () => void;
+  resetKey?: any;
 }
 
 interface State {
@@ -48,6 +49,12 @@ export class ErrorBoundary extends Component<Props, State> {
   public componentDidMount() {
     if (typeof window !== 'undefined') {
       window.addEventListener('popstate', this.handleReset);
+    }
+  }
+
+  public componentDidUpdate(prevProps: Props) {
+    if (prevProps.resetKey !== this.props.resetKey && this.state.hasError) {
+      this.handleReset();
     }
   }
 

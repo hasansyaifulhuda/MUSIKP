@@ -153,18 +153,24 @@ html {
 }
 
 /* Windows UI scale normalization: Prevents oversized/zoomed UI caused by Windows 125%/150% DPI scaling */
-html[data-platform="windows"] {
-  font-size: 14.5px;
+html[data-platform="windows"]:not([data-is-mobile="true"]) {
+  font-size: 14px;
   letter-spacing: -0.01em;
 }
 
-@media (min-width: 1536px) {
-  html[data-platform="windows"] {
-    font-size: 15px;
+@media (min-width: 1024px) {
+  html[data-platform="windows"]:not([data-is-mobile="true"]) {
+    font-size: 13.8px;
   }
 }
 
-/* Linux / Debian desktop standard scaling */
+@media (min-width: 1536px) {
+  html[data-platform="windows"]:not([data-is-mobile="true"]) {
+    font-size: 14.2px;
+  }
+}
+
+/* Linux / Debian desktop standard 100% 96DPI scaling */
 html[data-platform="linux"],
 html[data-platform="debian"] {
   font-size: 16px;

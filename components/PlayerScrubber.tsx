@@ -329,11 +329,13 @@ export const LyricsViewContainer = memo(function LyricsViewContainer({
   onSeek,
   isLoading,
   isSynced,
+  searchPass,
 }: {
   lyrics: any[];
   onSeek: (time: number) => void;
   isLoading: boolean;
   isSynced: boolean;
+  searchPass?: number;
 }) {
   const currentTime = usePlayerStore((state) => state.progress);
 
@@ -345,6 +347,7 @@ export const LyricsViewContainer = memo(function LyricsViewContainer({
         onSeek={onSeek}
         isLoading={isLoading}
         isSynced={isSynced}
+        searchPass={searchPass}
       />
     </div>
   );

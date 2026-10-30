@@ -76,6 +76,7 @@ public class MediaSessionBridge {
     private boolean isPlaying = false;
     private long currentPositionMs = 0;
     private long currentDurationMs = 0;
+    private long playbackStartTimeMs = 0;
 
     public MediaSessionBridge(Activity activity, WebView webView) {
         instance = this;
@@ -133,7 +134,10 @@ public class MediaSessionBridge {
             switch (focusChange) {
                 case AudioManager.AUDIOFOCUS_LOSS:
                 case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT:
-                    // Another app or incoming phone call took audio focus
+                    // Ignore transient focus loss during early playback (< 2s) to prevent race conditions with WebView HTML5 <audio>
+                    if (System.currentTimeMillis() - playbackStartTimeMs < 2000) {
+                        break;
+                    }
                     dispatchAction("pause");
                     break;
                 case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
@@ -151,40 +155,11 @@ public class MediaSessionBridge {
 
     @JavascriptInterface
     public synchronized boolean requestAudioFocus() {
-        if (hasAudioFocus) return true;
-        try {
-            if (audioManager == null) {
-                audioManager = (AudioManager) activity.getSystemService(Context.AUDIO_SERVICE);
-            }
-            if (audioManager == null) return false;
-
-            int result;
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                AudioAttributes playbackAttributes = new AudioAttributes.Builder()
-                    .setUsage(AudioAttributes.USAGE_MEDIA)
-                    .setContentType(AudioAttributes.CONTENT_TYPE_MUSIC)
-                    .build();
-
-                audioFocusRequest = new AudioFocusRequest.Builder(AudioManager.AUDIOFOCUS_GAIN)
-                    .setAudioAttributes(playbackAttributes)
-                    .setAcceptsDelayedFocusGain(true)
-                    .setOnAudioFocusChangeListener(focusChangeListener)
-                    .build();
-
-                result = audioManager.requestAudioFocus(audioFocusRequest);
-            } else {
-                result = audioManager.requestAudioFocus(
-                    focusChangeListener,
-                    AudioManager.STREAM_MUSIC,
-                    AudioManager.AUDIOFOCUS_GAIN
-                );
-            }
-
-            hasAudioFocus = (result == AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
-            return hasAudioFocus;
-        } catch (Exception ignored) {
-            return false;
-        }
+        // WebView HTML5 <audio> manages its own primary audio focus directly with Android OS.
+        // We do NOT aggressively request AUDIOFOCUS_GAIN from native to avoid stealing
+        // focus from Chromium WebView HTML5 <audio> or triggering unwanted focus loss callbacks.
+        hasAudioFocus = true;
+        return true;
     }
 
     @JavascriptInterface
@@ -241,6 +216,10 @@ public class MediaSessionBridge {
 
             @Override
             public void onPause() {
+                // Prevent spurious auto-pause signals during notification initialization or early playback (< 2s)
+                if (System.currentTimeMillis() - playbackStartTimeMs < 2000) {
+                    return;
+                }
                 dispatchAction("pause");
             }
 
@@ -300,6 +279,10 @@ public class MediaSessionBridge {
                 } else if (ACTION_PLAY.equals(action)) {
                     dispatchAction("play");
                 } else if (ACTION_PAUSE.equals(action)) {
+                    // Prevent spurious auto-pause signals during notification initialization or early playback (< 2s)
+                    if (System.currentTimeMillis() - playbackStartTimeMs < 2000) {
+                        return;
+                    }
                     dispatchAction("pause");
                 } else if (ACTION_NEXT.equals(action)) {
                     dispatchAction("next");
@@ -452,9 +435,8 @@ public class MediaSessionBridge {
             }
             lastNotification = notification;
 
-            // Coordinate with Foreground Service, Audio Focus & WakeLock to prevent Android process suspension
+            // Coordinate with Foreground Service & WakeLock to prevent Android process suspension
             if (isPlaying) {
-                requestAudioFocus();
                 acquireLocks();
 
                 AudioForegroundService fService = AudioForegroundService.getInstance();
@@ -592,6 +574,9 @@ public class MediaSessionBridge {
     @JavascriptInterface
     public void updatePlaybackState(String state, long positionMs, long durationMs) {
         boolean newPlaying = "playing".equalsIgnoreCase(state);
+        if (newPlaying && !this.isPlaying) {
+            this.playbackStartTimeMs = System.currentTimeMillis();
+        }
         boolean playStateChanged = (this.isPlaying != newPlaying);
         this.isPlaying = newPlaying;
         this.currentPositionMs = positionMs;

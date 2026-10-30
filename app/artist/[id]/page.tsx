@@ -11,26 +11,40 @@ import { db } from '@/lib/db';
 import { MarqueeText } from '@/components/MarqueeText';
 import { ArtistSkeleton } from '@/components/ArtistSkeleton';
 import { toast } from '@/lib/toast';
+import { getCachedArtist, setCachedArtist, prefetchArtist } from '@/lib/clientDataCache';
 
 export default function ArtistPage() {
   const params = useParams();
   const router = useRouter();
-  const [artist, setArtist] = useState<any>(null);
-  const [loading, setLoading] = useState(true);
+  const artistId = params?.id as string;
+  const initialCached = artistId ? getCachedArtist(artistId) : null;
+  const [artist, setArtist] = useState<any>(initialCached);
+  const [loading, setLoading] = useState(!initialCached);
   const [isBioExpanded, setIsBioExpanded] = useState(false);
   const [isSubscribed, setIsSubscribed] = useState(false);
   const playTrack = usePlayerStore((state) => state.playTrack);
 
   useEffect(() => {
     let active = true;
-    const fetchArtist = async () => {
+    if (!artistId) return;
+
+    const cached = getCachedArtist(artistId);
+    if (cached && !artist) {
+      setArtist(cached);
+      setLoading(false);
+    }
+
+    const fetchArtistData = async () => {
       try {
-        const res = await fetch(`/api/artist?id=${params.id}`);
-        if (!res.ok) throw new Error('Artist not found');
-        const raw = await res.json();
-        const data = raw?.result !== undefined ? raw.result : raw;
+        if (!cached && !artist) setLoading(true);
+        const data = await prefetchArtist(artistId);
+        if (!data) {
+          if (!cached && !artist) throw new Error('Artist not found');
+          return;
+        }
         if (active) {
           setArtist(data);
+          setCachedArtist(artistId, data);
           if (data && data.artistId) {
             const subscribed = await db.isSubscribed(data.artistId);
             setIsSubscribed(subscribed);
@@ -42,13 +56,12 @@ export default function ArtistPage() {
         if (active) setLoading(false);
       }
     };
-    if (params.id) {
-      fetchArtist();
-    }
+
+    fetchArtistData();
     return () => {
       active = false;
     };
-  }, [params.id]);
+  }, [artistId]);
 
   const handleSubscribe = async () => {
     if (!artist) return;

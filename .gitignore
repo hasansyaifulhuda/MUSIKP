@@ -7,7 +7,3 @@ coverage/
 !.env.example
 cookies*.txt
 storage/
-*.jks
-*.keystore
-*.apk
-*.aab

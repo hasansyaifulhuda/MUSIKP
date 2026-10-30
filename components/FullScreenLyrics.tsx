@@ -18,15 +18,22 @@ import {
   Disc3,
   Sparkles,
   Loader2,
-  Clock,
+  Target,
+  Zap,
   RotateCcw,
   FileText,
 } from 'lucide-react';
 import { motion } from 'motion/react';
 import { useLyricsOffsetStore } from '@/lib/lyricsOffsetStore';
+import {
+  formatMinuteSeconds,
+  detectLyricBySongProgress,
+  smartAlignToCurrentVoice,
+} from '@/lib/smartLyricsSync';
 import { db } from '@/lib/db';
 import { getFastCachedLyrics } from '@/lib/lyricsCache';
 import { getPersistentAudioElement } from '@/lib/audioElement';
+import { KaraokeLineWipe } from '@/components/KaraokeLyrics';
 
 export interface FullScreenLyricsProps {
   lyrics: LyricLine[];
@@ -67,9 +74,8 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
 
   const currentVideoId = currentTrack?.videoId;
   const lyricsOffset = useLyricsOffsetStore((state) => state.getOffset(currentVideoId));
-  const adjustOffset = useLyricsOffsetStore((state) => state.adjustOffset);
   const resetOffset = useLyricsOffsetStore((state) => state.resetOffset);
-  const [showOffsetControls, setShowOffsetControls] = useState(false);
+  const [showAiSyncModal, setShowAiSyncModal] = useState(false);
 
   const containerRef = useRef<HTMLDivElement>(null);
   const lineRefs = useRef<(HTMLDivElement | null)[]>([]);
@@ -153,6 +159,40 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
   const effectiveIsSynced = useMemo(() => {
     return activeIsSynced || isAutoTimingEnabled;
   }, [activeIsSynced, isAutoTimingEnabled]);
+
+  // Smart AI Auto-Sync Handlers
+  const handleAiAutoAlign = useCallback(() => {
+    const audio = getPersistentAudioElement();
+    const curSec = audio ? audio.currentTime : currentTime || 0;
+    if (!currentVideoId || effectiveLyrics.length === 0) return;
+
+    const detected = detectLyricBySongProgress(effectiveLyrics, curSec, duration);
+    if (detected.line) {
+      smartAlignToCurrentVoice(currentVideoId, detected.line.time, curSec, detected.line.text);
+      setShowAiSyncModal(false);
+    }
+  }, [currentVideoId, effectiveLyrics, currentTime, duration]);
+
+  const handleLockLineToCurrentVoice = useCallback(
+    (targetLineIndex?: number) => {
+      const audio = getPersistentAudioElement();
+      const curSec = audio ? audio.currentTime : currentTime || 0;
+      if (!currentVideoId || effectiveLyrics.length === 0) return;
+
+      const idx =
+        typeof targetLineIndex === 'number' && targetLineIndex >= 0
+          ? targetLineIndex
+          : activeIndex >= 0
+          ? activeIndex
+          : 0;
+      const targetLine = effectiveLyrics[idx];
+      if (targetLine) {
+        smartAlignToCurrentVoice(currentVideoId, targetLine.time, curSec, targetLine.text);
+        setShowAiSyncModal(false);
+      }
+    },
+    [currentVideoId, effectiveLyrics, activeIndex, currentTime]
+  );
 
   // 1. Real-time 60fps RAF Synchronization directly with native HTML5 audio element
   useEffect(() => {
@@ -355,27 +395,25 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
         </div>
 
         <div className="flex items-center gap-2">
-          {/* Lyrics Offset Calibration Trigger (Batch 3 - Poin 68) */}
+          {/* Smart AI Auto-Sync Trigger */}
           {activeIsSynced && currentVideoId && (
             <button
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
-                setShowOffsetControls((prev) => !prev);
+                setShowAiSyncModal((prev) => !prev);
               }}
               className={cn(
-                'flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-semibold transition-all cursor-pointer border',
+                'flex items-center gap-1.5 px-3 py-2 rounded-full text-xs font-semibold transition-all cursor-pointer border shadow-sm',
                 lyricsOffset !== 0
-                  ? 'bg-[#1DB954]/20 border-[#1DB954]/50 text-[#1DB954]'
+                  ? 'bg-emerald-500/20 border-emerald-500/50 text-emerald-400'
                   : 'bg-white/10 hover:bg-white/20 border-white/10 text-white/80'
               )}
-              title="Atur kalibrasi waktu lirik"
+              title="Deteksi posisi lagu & sinkronkan otomatis dengan AI"
             >
-              <Clock className="w-3.5 h-3.5 text-[#1DB954]" />
-              <span className="font-mono">
-                {lyricsOffset > 0 ? `+${lyricsOffset.toFixed(1)}s` : `${lyricsOffset.toFixed(1)}s`}
-              </span>
+              <Sparkles className="w-3.5 h-3.5 text-emerald-400 animate-pulse" />
+              <span>{lyricsOffset !== 0 ? 'AI Auto-Sync (Aktif)' : 'Auto-Sync AI'}</span>
             </button>
           )}
 
@@ -395,67 +433,72 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
         </div>
       </header>
 
-      {/* Floating Offset Calibration Bar in Full-Screen Lyrics */}
-      {showOffsetControls && activeIsSynced && currentVideoId && (
-        <div className="relative z-30 bg-black/60 backdrop-blur-xl border-b border-white/10 py-2 px-4 flex items-center justify-center animate-in fade-in slide-in-from-top-2 duration-200">
-          <div className="flex items-center gap-2 flex-wrap justify-center">
-            <span className="text-xs text-white/60 font-medium mr-1">Kalibrasi Sinkronisasi:</span>
+      {/* Floating Smart AI Auto-Sync Bar in Full-Screen Lyrics (No manual ms buttons) */}
+      {showAiSyncModal && activeIsSynced && currentVideoId && (
+        <div className="relative z-30 bg-black/85 backdrop-blur-xl border-b border-emerald-500/30 py-3 px-4 flex flex-col items-center justify-center gap-2.5 animate-in fade-in slide-in-from-top-2 duration-200">
+          <div className="flex items-center justify-between w-full max-w-lg">
+            <div className="flex items-center gap-1.5">
+              <Sparkles className="w-4 h-4 text-emerald-400" />
+              <span className="text-xs font-bold text-white">Sinkronisasi AI Otomatis</span>
+            </div>
+            <span className="text-xs font-mono font-bold text-emerald-400 bg-emerald-500/15 px-2.5 py-0.5 rounded-full border border-emerald-500/30">
+              Menit {formatMinuteSeconds(getPersistentAudioElement()?.currentTime || currentTime || 0)}
+            </span>
+          </div>
+
+          <div className="bg-white/5 border border-white/10 rounded-xl px-3 py-2 w-full max-w-lg flex items-center justify-between gap-2">
+            <span className="text-[10px] text-white/50 uppercase tracking-wider font-semibold shrink-0">
+              Lirik Terdeteksi:
+            </span>
+            <p className="text-xs text-white/90 font-medium italic truncate text-right">
+              "{effectiveLyrics[activeIndex >= 0 ? activeIndex : 0]?.text || 'Menunggu vokal lagu...'}"
+            </p>
+          </div>
+
+          <div className="flex items-center gap-2 flex-wrap justify-center w-full max-w-lg pt-0.5">
             <button
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
-                adjustOffset(currentVideoId, -0.5);
+                handleAiAutoAlign();
               }}
-              className="px-2.5 py-1 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-semibold text-white transition-colors cursor-pointer"
+              className="flex-1 flex items-center justify-center gap-1.5 px-4 py-2 bg-gradient-to-r from-emerald-500 to-teal-500 hover:brightness-110 active:scale-95 text-black rounded-xl text-xs font-bold shadow-lg shadow-emerald-500/20 transition-all cursor-pointer"
+              title="AI otomatis mendeteksi menit lagu dan menyesuaikan posisi lirik"
             >
-              -0.5s
+              <Zap className="w-3.5 h-3.5 fill-current" />
+              <span>Sinkron Otomatis (AI)</span>
             </button>
+
             <button
               type="button"
               onClick={(e) => {
                 e.stopPropagation();
                 e.preventDefault();
-                adjustOffset(currentVideoId, -0.1);
+                handleLockLineToCurrentVoice();
               }}
-              className="px-2.5 py-1 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-semibold text-white transition-colors cursor-pointer"
+              className="flex items-center gap-1.5 px-4 py-2 bg-white/10 hover:bg-white/20 active:scale-95 text-white rounded-xl text-xs font-semibold transition-all cursor-pointer border border-white/15"
+              title="Kunci lirik terdeteksi tepat ke suara penyanyi saat ini"
             >
-              -0.1s
+              <Target className="w-3.5 h-3.5 text-emerald-400" />
+              <span>Kunci Suara</span>
             </button>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                resetOffset(currentVideoId);
-              }}
-              className="flex items-center gap-1 px-3 py-1 bg-[#1DB954]/20 hover:bg-[#1DB954]/30 border border-[#1DB954]/40 text-[#1DB954] rounded-lg text-xs font-bold transition-colors cursor-pointer"
-            >
-              <RotateCcw className="w-3 h-3" />
-              <span>Reset</span>
-            </button>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                adjustOffset(currentVideoId, 0.1);
-              }}
-              className="px-2.5 py-1 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-semibold text-white transition-colors cursor-pointer"
-            >
-              +0.1s
-            </button>
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation();
-                e.preventDefault();
-                adjustOffset(currentVideoId, 0.5);
-              }}
-              className="px-2.5 py-1 bg-white/10 hover:bg-white/20 rounded-lg text-xs font-semibold text-white transition-colors cursor-pointer"
-            >
-              +0.5s
-            </button>
+
+            {lyricsOffset !== 0 && (
+              <button
+                type="button"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  e.preventDefault();
+                  resetOffset(currentVideoId);
+                  setShowAiSyncModal(false);
+                }}
+                className="px-3 py-2 bg-white/5 hover:bg-white/15 active:scale-95 text-white/70 hover:text-white rounded-xl text-xs transition-colors cursor-pointer border border-white/10"
+                title="Kembalikan ke timing bawaan"
+              >
+                <RotateCcw className="w-3.5 h-3.5" />
+              </button>
+            )}
           </div>
         </div>
       )}
@@ -581,8 +624,11 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
                 );
               }
 
-              // Synced Karaoke Mode: High-contrast active line highlight with smooth focus
+              // Synced Karaoke Mode: High-contrast active line highlight with smooth focus & real-time gradient fill wipe
               const isActive = idx === activeIndex;
+              const isPast = idx < activeIndex;
+              const nextLine = effectiveLyrics[idx + 1];
+
               return (
                 <div
                   key={`fs-lyric-${idx}`}
@@ -599,12 +645,22 @@ export const FullScreenLyrics = memo(function FullScreenLyrics({
                   className={cn(
                     'py-2.5 px-4 cursor-pointer transition-all duration-300 ease-out transform-gpu select-none rounded-2xl text-center origin-center',
                     isActive
-                      ? 'scale-[1.05] font-black text-white text-3xl sm:text-4xl md:text-5xl lg:text-6xl opacity-100 drop-shadow-[0_4px_30px_rgba(255,255,255,0.45)]'
+                      ? 'scale-[1.05] font-black text-white text-3xl sm:text-4xl md:text-5xl lg:text-6xl opacity-100 drop-shadow-[0_4px_30px_rgba(29,185,84,0.45)]'
                       : 'scale-100 font-bold text-white/30 text-xl sm:text-2xl md:text-3xl lg:text-4xl opacity-35 hover:opacity-75 hover:text-white/80'
                   )}
                 >
-                  <p className="leading-tight tracking-tight transition-colors duration-200 text-center">
-                    {line.text}
+                  <p className="leading-tight tracking-tight transition-colors duration-200 text-center flex justify-center items-center">
+                    <KaraokeLineWipe
+                      text={line.text}
+                      startTime={line.time}
+                      endTime={nextLine?.time}
+                      isActive={isActive}
+                      isPast={isPast}
+                      videoId={currentVideoId}
+                      activeColor="#1DB954"
+                      inactiveColor="rgba(255, 255, 255, 0.35)"
+                      completedColor="#1DB954"
+                    />
                   </p>
                 </div>
               );

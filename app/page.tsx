@@ -29,6 +29,7 @@ import dynamic from 'next/dynamic';
 import { CommunityPlaylistCard } from '@/components/CommunityPlaylistCard';
 import { HomeSkeleton } from '@/components/HomeSkeleton';
 import { Equalizer } from '@/components/Equalizer';
+import { prefetchArtist } from '@/lib/clientDataCache';
 
 const HorizontalScroll = dynamic(
   () => import('@/components/HorizontalScroll').then((m) => m.HorizontalScroll),
@@ -461,7 +462,7 @@ export default function Home() {
             <div className="flex items-center gap-2 shrink-0">
               <Link
                 href="/history"
-                prefetch={false}
+                prefetch={true}
                 className="p-2.5 bg-white/5 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/10"
                 title="Riwayat Pemutaran"
               >
@@ -469,7 +470,7 @@ export default function Home() {
               </Link>
               <Link
                 href="/download"
-                prefetch={false}
+                prefetch={true}
                 className="p-2.5 bg-white/5 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/10 relative"
                 title="Kelola Unduhan"
               >
@@ -482,7 +483,7 @@ export default function Home() {
               </Link>
               <Link
                 href="/settings"
-                prefetch={false}
+                prefetch={true}
                 className="p-2.5 bg-white/5 hover:bg-white/10 rounded-full text-white/80 hover:text-white transition-colors cursor-pointer border border-white/10"
                 title="Pengaturan"
               >
@@ -513,7 +514,7 @@ export default function Home() {
                           fill
                           sizes="64px"
                           className="object-cover"
-                          priority={idx < 4}
+                          priority={idx < 8}
                         />
                       </div>
                       <div className="flex-1 min-w-0 px-3 flex items-center justify-between">
@@ -664,6 +665,9 @@ export default function Home() {
                       return (
                         <Link
                           href={`/artist/${artist.artistId}`}
+                          prefetch={true}
+                          onMouseEnter={() => prefetchArtist(artist.artistId)}
+                          onTouchStart={() => prefetchArtist(artist.artistId)}
                           key={`artist-${artist.artistId}-${i}`}
                           className="flex-none w-36 md:w-44 p-3 bg-[#181818]/60 hover:bg-[#282828] rounded-md cursor-pointer group snap-start transition-colors duration-200 select-none shadow-sm flex flex-col items-center text-center"
                         >
