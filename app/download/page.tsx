@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import Image from 'next/image';
 import { ArrowLeft, DownloadCloud, Play, Shuffle, Trash2, CheckCircle2, Music } from 'lucide-react';
@@ -29,7 +29,7 @@ function OfflineTrackThumbnail({ src, alt, priority }: { src: string; alt: strin
           decoding="async"
           className="object-cover"
           onError={() => setImgError(true)}
-          unoptimized={src.startsWith('data:') || src.startsWith('blob:')}
+          unoptimized={true}
         />
       ) : (
         <div className="w-full h-full bg-gradient-to-br from-neutral-800 to-neutral-950 flex items-center justify-center">
@@ -108,27 +108,25 @@ export default function DownloadPage() {
     };
   }, [loadOfflineTracks]);
 
+  const trackList = useMemo(() => {
+    return offlineTracks.map((item) => item.track).filter(Boolean);
+  }, [offlineTracks]);
+
   const handlePlayAll = () => {
-    if (offlineTracks.length === 0) return;
-    const tracks: Track[] = offlineTracks.map((item) => item.track).filter(Boolean);
-    if (tracks.length > 0) {
-      playTrack(tracks[0], tracks, 'playlist');
-      toast.success(`Memutar ${tracks.length} lagu offline`);
-    }
+    if (trackList.length === 0) return;
+    playTrack(trackList[0], trackList, 'playlist', 0);
+    toast.success(`Memutar ${trackList.length} lagu offline`);
   };
 
   const handleShufflePlay = () => {
-    if (offlineTracks.length === 0) return;
-    const tracks: Track[] = offlineTracks.map((item) => item.track).filter(Boolean);
-    if (tracks.length > 0) {
-      const shuffled = [...tracks];
-      for (let i = shuffled.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
-      }
-      playTrack(shuffled[0], shuffled, 'playlist');
-      toast.success(`Memutar acak ${shuffled.length} lagu offline`);
+    if (trackList.length === 0) return;
+    const shuffled = [...trackList];
+    for (let i = shuffled.length - 1; i > 0; i--) {
+      const j = Math.floor(Math.random() * (i + 1));
+      [shuffled[i], shuffled[j]] = [shuffled[j], shuffled[i]];
     }
+    playTrack(shuffled[0], shuffled, 'playlist', 0);
+    toast.success(`Memutar acak ${shuffled.length} lagu offline`);
   };
 
   const handleRemoveTrack = async (videoId: string, trackName: string, e: React.MouseEvent) => {
@@ -165,9 +163,9 @@ export default function DownloadPage() {
   };
 
   return (
-    <main className="min-h-screen pb-28 select-none">
+    <main className="min-h-screen pb-[calc(env(safe-area-inset-bottom,0px)+7rem)] select-none">
       {/* Sticky Header */}
-      <div className="sticky top-0 z-20 bg-black/60 backdrop-blur-md pt-5 pb-4 px-4 md:px-8 border-b border-white/5 flex items-center justify-between">
+      <div className="sticky top-0 z-20 bg-black/75 backdrop-blur-md pt-[calc(env(safe-area-inset-top,0px)+1rem)] pb-4 px-4 md:px-8 border-b border-white/5 flex items-center justify-between">
         <div className="flex items-center gap-4 flex-1 min-w-0">
           <button
             onClick={() => router.back()}
@@ -221,17 +219,21 @@ export default function DownloadPage() {
               <div key={i} className="h-16 bg-white/5 rounded-xl animate-pulse" />
             ))}
           </div>
-        ) : offlineTracks.length === 0 ? (
+        ) : trackList.length === 0 ? (
           <div className="py-24 text-center text-xs text-white/40">
             Belum ada lagu yang diunduh. Lagu yang disimpan saat online akan muncul di sini.
           </div>
         ) : (
           <VirtualTrackList
-            tracks={offlineTracks.map((item) => item.track)}
-            queue={offlineTracks.map((item) => item.track)}
+            tracks={trackList}
+            queue={trackList}
+            itemHeight={76}
+            overscan={6}
             renderItem={(track, index) => {
               const isCurrent = currentTrack?.videoId === track.videoId;
-              const thumb = getHighResImage(track.thumbnails?.[track.thumbnails.length - 1]?.url, 120);
+              const thumb =
+                (track as any).offlineThumbnail ||
+                getHighResImage(track.thumbnails?.[track.thumbnails.length - 1]?.url, 120);
               const artistName = Array.isArray(track.artist)
                 ? track.artist.map((a: any) => a.name).join(', ')
                 : track.artist?.name || 'Unknown Artist';
@@ -240,8 +242,7 @@ export default function DownloadPage() {
                 <div
                   key={track.videoId ? `${track.videoId}-${index}` : index}
                   onClick={() => {
-                    const allTracks = offlineTracks.map((t) => t.track);
-                    playTrack(track, allTracks, 'playlist', index);
+                    playTrack(track, trackList, 'playlist', index);
                   }}
                   className={`flex items-center gap-3.5 p-2.5 md:p-3 rounded-xl transition-all cursor-pointer group select-none ${
                     isCurrent ? 'bg-white/10' : 'hover:bg-white/[0.06]'

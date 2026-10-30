@@ -2,9 +2,10 @@
 // Advanced Stale-While-Revalidate Caching Strategy & Shell Pre-caching
 // Excludes Next.js internal chunks & RSC routes to guarantee seamless client-side navigation without full-page reloads
 
-const CACHE_NAME = 'musicfy-v3-cache';
+const CACHE_NAME = 'musicfy-v4-cache';
 const CORE_ASSETS = [
   '/',
+  '/download',
   '/manifest.json',
   '/icon.png',
   '/favicon.ico',

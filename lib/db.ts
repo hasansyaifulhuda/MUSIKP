@@ -57,6 +57,8 @@ export function isBlobLike(b: any): boolean {
   if (typeof b.size === 'number' && b.size > 0 && typeof b.slice === 'function') return true;
   if (b instanceof ArrayBuffer && b.byteLength > 0) return true;
   if (b.buffer instanceof ArrayBuffer && b.buffer.byteLength > 0) return true;
+  if (ArrayBuffer.isView(b) && (b as any).byteLength > 0) return true;
+  if (typeof b === 'object' && typeof b.byteLength === 'number' && b.byteLength > 0) return true;
   return false;
 }
 
@@ -68,6 +70,7 @@ export function ensureBlob(b: any): Blob {
   if (typeof Blob !== 'undefined' && b instanceof Blob) return b;
   if (b instanceof ArrayBuffer) return new Blob([b], { type: 'audio/mpeg' });
   if (b?.buffer instanceof ArrayBuffer) return new Blob([b.buffer], { type: 'audio/mpeg' });
+  if (ArrayBuffer.isView(b)) return new Blob([(b as any).buffer], { type: 'audio/mpeg' });
   if (isBlobLike(b)) {
     try {
       return new Blob([b], { type: b.type || 'audio/mpeg' });
@@ -716,8 +719,8 @@ export const db = {
     if (typeof window === 'undefined') return [];
     try {
       const items = await dbManager.executeWithRetry((idb) => idb.getAll('offline_tracks'));
-      const validItems = items
-        .filter((it) => it && it.track && (isBlobLike(it.blob) || (typeof it.sizeBytes === 'number' && it.sizeBytes > 0)))
+      const validItems = (items || [])
+        .filter((it) => it && it.track && (isBlobLike(it.blob) || (typeof it.sizeBytes === 'number' && it.sizeBytes > 0) || Boolean(it.blob)))
         .map((it) => {
           if (it.blob && !(it.blob instanceof Blob)) {
             it.blob = ensureBlob(it.blob);
@@ -963,9 +966,32 @@ export const db = {
       await this.evictLruOfflineTracks();
     } catch {}
 
+    // Opportunistically cache thumbnail as base64 Data URI for 100% offline cover art rendering
+    const enrichedTrack = { ...track };
+    const rawThumbUrl = track.thumbnails?.[track.thumbnails.length - 1]?.url;
+    if (rawThumbUrl && typeof window !== 'undefined' && navigator.onLine) {
+      try {
+        const imgRes = await fetch(rawThumbUrl).catch(() => null);
+        if (imgRes && imgRes.ok) {
+          const imgBlob = await imgRes.blob();
+          if (imgBlob && imgBlob.size > 0) {
+            const reader = new FileReader();
+            const dataUri = await new Promise<string>((resolve) => {
+              reader.onloadend = () => resolve(typeof reader.result === 'string' ? reader.result : '');
+              reader.onerror = () => resolve('');
+              reader.readAsDataURL(imgBlob);
+            });
+            if (dataUri) {
+              (enrichedTrack as any).offlineThumbnail = dataUri;
+            }
+          }
+        }
+      } catch {}
+    }
+
     const item: OfflineTrack = {
       videoId: track.videoId,
-      track,
+      track: enrichedTrack,
       blob: audioBlob,
       downloadedAt: Date.now(),
       lastPlayedAt: Date.now(),

@@ -1,7 +1,11 @@
 package com.musicfy.app;
 
 import android.Manifest;
+import android.content.Context;
+import android.content.Intent;
 import android.content.pm.PackageManager;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.os.Build;
 import android.os.Bundle;
 import android.webkit.WebSettings;
@@ -39,16 +43,31 @@ public class MainActivity extends BridgeActivity {
             if (bridge != null && bridge.getWebView() != null) {
                 WebView webView = bridge.getWebView();
                 WebSettings settings = webView.getSettings();
-                // Ensure ongoing and background audio does not require user gestures for autoplaying next tracks
+
+                // 1. Gesture-free audio playback: ensures background transitions & next tracks autoplay smoothly
                 settings.setMediaPlaybackRequiresUserGesture(false);
                 settings.setJavaScriptCanOpenWindowsAutomatically(true);
 
-                // Elevate WebView renderer priority so Android LMK does not kill it when user runs heavy games
+                // 2. Offline caching & IndexedDB persistence support in WebView
+                settings.setDomStorageEnabled(true);
+                settings.setDatabaseEnabled(true);
+                settings.setAllowFileAccess(true);
+                settings.setAllowContentAccess(true);
+
+                // Use offline cache when network is unavailable
+                try {
+                    ConnectivityManager cm = (ConnectivityManager) getSystemService(Context.CONNECTIVITY_SERVICE);
+                    NetworkInfo netInfo = cm != null ? cm.getActiveNetworkInfo() : null;
+                    boolean isConnected = (netInfo != null && netInfo.isConnectedOrConnecting());
+                    settings.setCacheMode(isConnected ? WebSettings.LOAD_DEFAULT : WebSettings.LOAD_CACHE_ELSE_NETWORK);
+                } catch (Exception ignored) {}
+
+                // 3. Elevate WebView renderer priority so Android LMK does not kill it when user runs heavy games
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
                     webView.setRendererPriorityPolicy(WebView.RENDERER_PRIORITY_IMPORTANT, false);
                 }
 
-                // Initialize native Android MediaSession & Status bar / Lockscreen Notification bridge
+                // 4. Initialize native Android MediaSession & Status bar / Lockscreen Notification bridge
                 if (mediaBridge == null) {
                     mediaBridge = new MediaSessionBridge(this, webView);
                     webView.addJavascriptInterface(mediaBridge, "AndroidMediaBridge");
@@ -60,7 +79,7 @@ public class MainActivity extends BridgeActivity {
     @Override
     public void onPause() {
         super.onPause();
-        // Prevent Capacitor from freezing JS timers and HTML5 audio threads when minimized to home screen
+        // Prevent Capacitor from freezing JS timers and HTML5 audio threads when minimized to home screen or running heavy games
         try {
             if (bridge != null && bridge.getWebView() != null) {
                 WebView webView = bridge.getWebView();

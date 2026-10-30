@@ -44,9 +44,14 @@ public class MediaSessionBridge {
     private static final String ACTION_NEXT = "com.musicfy.app.ACTION_NEXT";
 
     private static volatile Notification lastNotification = null;
+    private static volatile MediaSessionBridge instance = null;
 
     public static Notification getLastNotification() {
         return lastNotification;
+    }
+
+    public static MediaSessionBridge getInstance() {
+        return instance;
     }
 
     private final Activity activity;
@@ -73,6 +78,7 @@ public class MediaSessionBridge {
     private long currentDurationMs = 0;
 
     public MediaSessionBridge(Activity activity, WebView webView) {
+        instance = this;
         this.activity = activity;
         this.webView = webView;
         this.notificationManager = (NotificationManager) activity.getSystemService(Context.NOTIFICATION_SERVICE);
@@ -131,10 +137,12 @@ public class MediaSessionBridge {
                     dispatchAction("pause");
                     break;
                 case AudioManager.AUDIOFOCUS_LOSS_TRANSIENT_CAN_DUCK:
-                    // Game sound effects or navigation alert: Keep playing without crashing
+                    // Game sound effects or navigation alert: Duck volume smoothly without crashing
+                    dispatchAction("duckVolume", 0.4);
                     break;
                 case AudioManager.AUDIOFOCUS_GAIN:
                     // Regained audio focus after interruption
+                    dispatchAction("restoreVolume");
                     dispatchAction("play");
                     break;
             }
@@ -583,13 +591,42 @@ public class MediaSessionBridge {
 
     @JavascriptInterface
     public void updatePlaybackState(String state, long positionMs, long durationMs) {
-        this.isPlaying = "playing".equalsIgnoreCase(state);
+        boolean newPlaying = "playing".equalsIgnoreCase(state);
+        boolean playStateChanged = (this.isPlaying != newPlaying);
+        this.isPlaying = newPlaying;
         this.currentPositionMs = positionMs;
         if (durationMs > 0) {
             this.currentDurationMs = durationMs;
         }
 
-        activity.runOnUiThread(this::showNotification);
+        activity.runOnUiThread(() -> {
+            updateMediaSessionPositionOnly();
+            if (playStateChanged) {
+                showNotification();
+            }
+        });
+    }
+
+    private void updateMediaSessionPositionOnly() {
+        if (mediaSession == null) return;
+        try {
+            long actions = PlaybackState.ACTION_PLAY |
+                           PlaybackState.ACTION_PAUSE |
+                           PlaybackState.ACTION_SKIP_TO_NEXT |
+                           PlaybackState.ACTION_SKIP_TO_PREVIOUS |
+                           PlaybackState.ACTION_SEEK_TO |
+                           PlaybackState.ACTION_STOP;
+
+            PlaybackState.Builder stateBuilder = new PlaybackState.Builder()
+                .setActions(actions)
+                .setState(
+                    isPlaying ? PlaybackState.STATE_PLAYING : PlaybackState.STATE_PAUSED,
+                    currentPositionMs,
+                    isPlaying ? 1.0f : 0.0f
+                );
+
+            mediaSession.setPlaybackState(stateBuilder.build());
+        } catch (Exception ignored) {}
     }
 
     @JavascriptInterface
@@ -616,6 +653,9 @@ public class MediaSessionBridge {
                 }
                 lastNotification = null;
             } catch (Exception ignored) {}
+            if (instance == this) {
+                instance = null;
+            }
         });
     }
 
@@ -624,7 +664,9 @@ public class MediaSessionBridge {
             abandonAudioFocus();
             releaseLocks();
             if (receiver != null) {
-                activity.unregisterReceiver(receiver);
+                try {
+                    activity.unregisterReceiver(receiver);
+                } catch (Exception ignored) {}
                 receiver = null;
             }
             if (mediaSession != null) {
@@ -639,13 +681,18 @@ public class MediaSessionBridge {
             }
             Intent sIntent = new Intent(activity, AudioForegroundService.class);
             sIntent.setAction(AudioForegroundService.ACTION_STOP);
-            activity.startService(sIntent);
-            activity.stopService(sIntent);
+            try {
+                activity.startService(sIntent);
+                activity.stopService(sIntent);
+            } catch (Exception ignored) {}
 
             if (notificationManager != null) {
                 notificationManager.cancel(NOTIFICATION_ID);
             }
             lastNotification = null;
         } catch (Exception ignored) {}
+        if (instance == this) {
+            instance = null;
+        }
     }
 }

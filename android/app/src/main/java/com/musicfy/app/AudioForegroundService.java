@@ -166,6 +166,10 @@ public class AudioForegroundService extends Service {
         super.onTaskRemoved(rootIntent);
         // The user explicitly closed/swiped away the app from recent apps!
         try {
+            MediaSessionBridge bridge = MediaSessionBridge.getInstance();
+            if (bridge != null) {
+                bridge.destroy();
+            }
             releaseServiceWakeLock();
             stopForegroundCompat(true);
             NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);
@@ -179,6 +183,10 @@ public class AudioForegroundService extends Service {
     @Override
     public void onDestroy() {
         try {
+            MediaSessionBridge bridge = MediaSessionBridge.getInstance();
+            if (bridge != null) {
+                bridge.destroy();
+            }
             releaseServiceWakeLock();
             stopForegroundCompat(true);
             NotificationManager nm = (NotificationManager) getSystemService(Context.NOTIFICATION_SERVICE);

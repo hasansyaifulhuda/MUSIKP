@@ -12,7 +12,7 @@ import React, {
 import { usePlayerStore, Track, extractVideoId } from '@/lib/store';
 import { useHotkeys } from '@/hooks/useHotkeys';
 import { useOnlineStatus } from '@/hooks/useOnlineStatus';
-import { db, OfflineTrack } from '@/lib/db';
+import { db, OfflineTrack, ensureBlob } from '@/lib/db';
 import { toast } from '@/lib/toast';
 import { getHighResImage } from '@/lib/utils';
 
@@ -88,7 +88,15 @@ const AUDIO_SESSION_STORAGE_KEY = 'pmusic_audio_session_v1';
  * and lock screen controllers can load and display notification artwork without failures.
  */
 function toAbsoluteArtworkUrl(url: string | undefined, size = 512): string {
-  if (!url) return `https://picsum.photos/seed/music/${size}/${size}`;
+  if (!url) {
+    if (typeof window !== 'undefined') {
+      return `${window.location.origin}/icon.png`;
+    }
+    return '/icon.png';
+  }
+  if (url.startsWith('data:') || url.startsWith('blob:')) {
+    return url;
+  }
   const hires = getHighResImage(url, size);
   if (hires.startsWith('//')) {
     return `https:${hires}`;
@@ -845,12 +853,8 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
 
       let audioBlob: Blob | null = null;
-      if (offlineItem?.blob instanceof Blob) {
-        audioBlob = offlineItem.blob;
-      } else if (offlineItem?.blob && (offlineItem.blob as any).buffer) {
-        audioBlob = new Blob([(offlineItem.blob as any).buffer], { type: 'audio/mpeg' });
-      } else if (offlineItem?.blob && typeof (offlineItem.blob as any).slice === 'function') {
-        audioBlob = offlineItem.blob as Blob;
+      if (offlineItem?.blob) {
+        audioBlob = ensureBlob(offlineItem.blob);
       }
 
       if (audioBlob && audioBlob.size > 0) {
@@ -1236,6 +1240,19 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
           mediaActionsRef.current.seekTo(arg);
         } else if (action === 'stop') {
           mediaActionsRef.current.pause();
+        } else if (action === 'duckVolume') {
+          const audio = getPersistentAudioElement();
+          if (audio) {
+            const factor = typeof arg === 'number' ? arg : 0.4;
+            const targetVol = Math.max(0, Math.min(1, ((usePlayerStore.getState().volume ?? 100) / 100) * factor));
+            audio.volume = targetVol;
+          }
+        } else if (action === 'restoreVolume') {
+          const audio = getPersistentAudioElement();
+          if (audio) {
+            const targetVol = Math.max(0, Math.min(1, (usePlayerStore.getState().volume ?? 100) / 100));
+            audio.volume = targetVol;
+          }
         }
       } catch (err) {
         console.error('[AndroidMediaBridge] Action error:', err);
@@ -1405,19 +1422,59 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       }
       terminateBackgroundAudio();
     };
-  }, []);
+  }, [updateMediaSessionPosition]);
 
   // Capacitor App Lifecycle & App State Change Listener (Requirement 1 & 2)
   useEffect(() => {
     let appStateSub: any = null;
+    let pauseSub: any = null;
+    let backSub: any = null;
 
     const setupAppListener = async () => {
       try {
         const { App } = await import('@capacitor/app');
+
+        // 1. App State Change: active vs background/minimized
         appStateSub = await App.addListener('appStateChange', (state) => {
-          // When app is minimized or backgrounded:
-          // If audio is not playing, immediately dismiss any lingering notifications and reset media session!
-          if (!state.isActive && !usePlayerStore.getState().isPlaying) {
+          // If the app is sent to background / closed and music is NOT playing,
+          // immediately reset mediaSession and dismiss notification!
+          if (!state.isActive) {
+            const isPlayingNow = usePlayerStore.getState().isPlaying;
+            if (!isPlayingNow) {
+              if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+                try {
+                  navigator.mediaSession.playbackState = 'none';
+                  navigator.mediaSession.metadata = null;
+                } catch {}
+              }
+              terminateBackgroundAudio();
+            }
+          }
+        });
+
+        // 2. Pause listener when app loses focus
+        pauseSub = await App.addListener('pause', () => {
+          const isPlayingNow = usePlayerStore.getState().isPlaying;
+          if (!isPlayingNow) {
+            if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+              try {
+                navigator.mediaSession.playbackState = 'none';
+                navigator.mediaSession.metadata = null;
+              } catch {}
+            }
+            terminateBackgroundAudio();
+          }
+        });
+
+        // 3. Back Button: When exiting root on Android, dismiss notification if paused
+        backSub = await App.addListener('backButton', ({ canGoBack }) => {
+          if (!canGoBack && !usePlayerStore.getState().isPlaying) {
+            if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
+              try {
+                navigator.mediaSession.playbackState = 'none';
+                navigator.mediaSession.metadata = null;
+              } catch {}
+            }
             terminateBackgroundAudio();
           }
         });
@@ -1443,6 +1500,12 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       if (appStateSub && typeof appStateSub.remove === 'function') {
         appStateSub.remove();
       }
+      if (pauseSub && typeof pauseSub.remove === 'function') {
+        pauseSub.remove();
+      }
+      if (backSub && typeof backSub.remove === 'function') {
+        backSub.remove();
+      }
       window.removeEventListener('beforeunload', handleWindowUnload);
       window.removeEventListener('pagehide', handleWindowUnload);
     };
@@ -1461,7 +1524,11 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
       return;
     }
 
-    const rawThumbnail = currentTrack.thumbnails?.[currentTrack.thumbnails.length - 1]?.url;
+    const rawThumbnail =
+      (currentTrack as any).offlineThumbnail ||
+      currentTrack.thumbnails?.[currentTrack.thumbnails.length - 1]?.url ||
+      (currentTrack as any).thumbnail ||
+      (currentTrack as any).img;
     const artist = Array.isArray(currentTrack.artist)
       ? currentTrack.artist.map((a: any) => (typeof a === 'string' ? a : a?.name || '')).filter(Boolean).join(', ')
       : (typeof currentTrack.artist === 'string' ? currentTrack.artist : currentTrack.artist?.name) || 'Unknown Artist';
@@ -1476,17 +1543,18 @@ export function MusicProvider({ children }: { children: React.ReactNode }) {
     if (typeof navigator !== 'undefined' && 'mediaSession' in navigator) {
       if (typeof window !== 'undefined' && 'MediaMetadata' in window) {
         try {
+          const artType = absoluteArtwork.startsWith('data:image/png') || absoluteArtwork.endsWith('.png') ? 'image/png' : 'image/jpeg';
           navigator.mediaSession.metadata = new MediaMetadata({
             title: trackTitle,
             artist: artist || 'MusicFY Artist',
             album: albumTitle,
             artwork: [
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 96), sizes: '96x96', type: 'image/jpeg' },
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 128), sizes: '128x128', type: 'image/jpeg' },
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 192), sizes: '192x192', type: 'image/jpeg' },
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 256), sizes: '256x256', type: 'image/jpeg' },
-              { src: toAbsoluteArtworkUrl(rawThumbnail, 384), sizes: '384x384', type: 'image/jpeg' },
-              { src: absoluteArtwork, sizes: '512x512', type: 'image/jpeg' },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 96), sizes: '96x96', type: artType },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 128), sizes: '128x128', type: artType },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 192), sizes: '192x192', type: artType },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 256), sizes: '256x256', type: artType },
+              { src: toAbsoluteArtworkUrl(rawThumbnail, 384), sizes: '384x384', type: artType },
+              { src: absoluteArtwork, sizes: '512x512', type: artType },
             ],
           });
         } catch (err) {

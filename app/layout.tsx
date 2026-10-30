@@ -47,6 +47,30 @@ export default function RootLayout({ children }: { children: React.ReactNode }) 
           dangerouslySetInnerHTML={{
             __html: `
               (function() {
+                try {
+                  var ua = navigator.userAgent || '';
+                  var plat = (navigator.userAgentData && navigator.userAgentData.platform) || navigator.platform || '';
+                  var isAndroid = /android/i.test(ua);
+                  var isCapacitor = Boolean(window.Capacitor && window.Capacitor.isNativePlatform && window.Capacitor.isNativePlatform());
+                  var isAndroidApk = isAndroid && (isCapacitor || Boolean(window.AndroidMediaBridge));
+                  var isWindows = /windows|win32|win64/i.test(ua) || /win/i.test(plat);
+                  var isDebian = !isAndroid && (/debian|ubuntu/i.test(ua) || (/linux/i.test(ua) && /x11/i.test(ua)));
+                  var isLinux = !isAndroid && (/linux|x11/i.test(ua) || /linux/i.test(plat));
+                  
+                  var os = 'unknown';
+                  if (isAndroid) os = 'android';
+                  else if (isWindows) os = 'windows';
+                  else if (isDebian) os = 'debian';
+                  else if (isLinux) os = 'linux';
+                  else if (/mac/i.test(ua) || /mac/i.test(plat)) os = 'macos';
+
+                  var root = document.documentElement;
+                  root.setAttribute('data-platform', os);
+                  root.setAttribute('data-is-apk', isAndroidApk ? 'true' : 'false');
+                  root.style.setProperty('--platform-scale', isWindows ? '0.90625' : '1');
+                } catch(e) {}
+              })();
+              (function() {
                 var NOISY = [
                   "Failed to execute 'postMessage' on 'DOMWindow'",
                   "The target origin provided",
